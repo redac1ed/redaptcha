@@ -1,0 +1,57 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #e2e8f0;
+  background: #060912;
+}
+
+body {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+}
+
+.widget {
+  text-align: center;
+  padding: 1.5rem;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  background: #0b0f1a;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.subtitle {
+  margin: 0.25rem 0 1rem;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
+canvas {
+  border-radius: 8px;
+  display: block;
+}
+
+.verify-btn {
+  margin-top: 1rem;
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.verify-btn:hover {
+  background: #1d4ed8;
+}
+
+.status {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}

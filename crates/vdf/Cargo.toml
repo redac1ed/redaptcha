@@ -1,0 +1,9 @@
+[package]
+name = "vdf"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+num-bigint.workspace = true
+num-integer.workspace = true
+sha2.workspace = true

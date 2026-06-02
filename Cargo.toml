@@ -1,6 +1,13 @@
-[package]
-name = "redaptcha"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/vdf"]
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+crypto-bigint = "0.5"
+sha2 = "0.10"
+num-bigint = "0.4"
+num-integer = "0.1"
