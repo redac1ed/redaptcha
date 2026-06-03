@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vdf"]
+members = ["crates/vdf", "crates/core", "crates/server"]
 
 [workspace.package]
 edition = "2021"
@@ -11,3 +11,4 @@ crypto-bigint = "0.5"
 sha2 = "0.10"
 num-bigint = "0.4"
 num-integer = "0.1"
+serde = { version = "1", features = ["derive"] }
