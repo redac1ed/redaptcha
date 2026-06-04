@@ -83,10 +83,17 @@ function floorTwoPowTDiv(t, l) {
   return q;
 }
 
-export async function evalVdf(seedHex, modulusHex, t, onProgress) {
+export function trajectoryBytes(clicks) {
+  const s = clicks.map((c) => `${c.x},${c.y},${c.t};`).join("");
+  return new TextEncoder().encode(s);
+}
+
+export async function evalVdf(seedHex, modulusHex, t, clicks, onProgress) {
   const N = BigInt("0x" + modulusHex);
   const prefix = new TextEncoder().encode("redaptcha-vdf-x");
-  const xHash = await sha256(concat(prefix, hexToBytes(seedHex)));
+  const xHash = await sha256(
+    concat(prefix, hexToBytes(seedHex), trajectoryBytes(clicks))
+  );
   const x = (BigInt("0x" + bytesToHex(xHash)) % (N - 2n)) + 2n;
   let y = x;
   const BATCH = 1000;

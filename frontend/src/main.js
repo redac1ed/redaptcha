@@ -2,11 +2,12 @@ const SERVER = "http://localhost:3000";
 const canvas = document.getElementById("puzzle");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
-const verifyBtn = document.getElementById("verify");
+const checkbox = document.getElementById("checkbox");
+const captchaEl = document.getElementById("captcha");
+const panel = document.getElementById("puzzle-panel");
 const timerBar = document.getElementById("timer-bar");
 const W = canvas.width, H = canvas.height;
 const NOISE_COUNT = 100, TARGET_COUNT = 3, TARGET_R = 14, TIME_LIMIT = 15000;
-const DIFFICULTY_DISPLAY_SECS = 3;
 const noise = Array.from({ length: NOISE_COUNT }, () => ({
   x: Math.random() * W, y: Math.random() * H,
   vx: (Math.random() - 0.5) * 1.2, vy: (Math.random() - 0.5) * 1.2,
@@ -17,6 +18,16 @@ let challenge = null;
 let targets = [], remaining = 0, deadline = 0;
 let worker = null;
 let vdfProgress = 0;
+let clicks = [];
+let puzzleStart = 0;
+
+function setUi() {
+  captchaEl.classList.toggle("is-loading", state === "vdf");
+  captchaEl.classList.toggle("is-success", state === "success");
+  captchaEl.classList.toggle("is-error", state === "failed");
+  panel.classList.toggle("is-open", state === "active" || state === "vdf");
+  checkbox.disabled = state !== "idle" && state !== "success" && state !== "failed";
+}
 
 function moveNoise() {
   for (const d of noise) {
@@ -67,14 +78,6 @@ function draw(vdfProgress) {
     ctx.strokeStyle = "#3b82f6";
     ctx.strokeRect(20, H / 2 - 6, W - 40, 12);
   }
-  if (state === "success" || state === "failed") {
-    ctx.fillStyle = "rgba(11,15,26,0.65)";
-    ctx.fillRect(0, 0, W, H);
-    ctx.font = "bold 20px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillStyle = state === "success" ? "#4ade80" : "#f87171";
-    ctx.fillText(state === "success" ? "Verified" : "Failed", W / 2, H / 2);
-  }
 }
 
 function loop() {
@@ -91,50 +94,52 @@ function loop() {
 }
 
 async function startChallenge() {
-  verifyBtn.disabled = true;
   statusEl.textContent = "Fetching challenge…";
+  setUi();
   try {
     const res = await fetch(`${SERVER}/challenge`, { method: "POST" });
     challenge = await res.json();
   } catch {
     statusEl.textContent = "Could not reach server";
-    verifyBtn.disabled = false;
+    state = "idle";
+    setUi();
     return;
   }
   state = "active";
+  clicks = [];
+  puzzleStart = Date.now();
   spawnTargets();
   remaining = TARGET_COUNT;
   deadline = Date.now() + TIME_LIMIT;
   timerBar.style.opacity = "1";
   timerBar.style.transform = "scaleX(1)";
-  statusEl.textContent = `Click all ${TARGET_COUNT} orange targets`;
-  verifyBtn.textContent = "Reset";
-  verifyBtn.disabled = false;
+  statusEl.textContent = `Click all ${TARGET_COUNT} targets`;
+  setUi();
 }
 function puzzleSolved() {
   state = "vdf";
   vdfProgress = 0;
   timerBar.style.opacity = "0";
-  statusEl.textContent = "Running VDF… 0%";
-  verifyBtn.disabled = true;
+  statusEl.textContent = "Verifying… 0%";
+  setUi();
   worker = new Worker(new URL("./vdf-worker.js", import.meta.url), { type: "module" });
   worker.onmessage = async (e) => {
     if (e.data.type === "progress") {
       vdfProgress = e.data.progress;
-      statusEl.textContent = `Running VDF… ${Math.round(e.data.progress * 100)}%`;
+      statusEl.textContent = `Verifying… ${Math.round(e.data.progress * 100)}%`;
     } else if (e.data.type === "done") {
       await submitSolution(e.data.outputHex, e.data.proofHex);
     } else if (e.data.type === "error") {
-      statusEl.textContent = `VDF error: ${e.data.message}`;
+      statusEl.textContent = `Error: ${e.data.message}`;
       state = "failed";
-      verifyBtn.textContent = "Try again";
-      verifyBtn.disabled = false;
+      setUi();
     }
   };
   worker.postMessage({
     seedHex: challenge.seed_hex,
     modulusHex: challenge.modulus_hex,
     difficulty: challenge.difficulty,
+    clicks,
   });
 }
 async function submitSolution(outputHex, proofHex) {
@@ -147,34 +152,32 @@ async function submitSolution(outputHex, proofHex) {
         challenge_id: challenge.id,
         output_hex: outputHex,
         proof_hex: proofHex,
+        clicks,
       }),
     });
     const result = await res.json();
     state = result.ok ? "success" : "failed";
-    statusEl.textContent = result.ok
-      ? `Verified — token: ${result.token.slice(0, 8)}…`
-      : `Failed: ${result.message}`;
+    statusEl.textContent = result.ok ? "Success!" : `Failed: ${result.message}`;
   } catch {
     state = "failed";
-    statusEl.textContent = "Network error during verify";
+    statusEl.textContent = "Network error";
   }
-  verifyBtn.textContent = "Try again";
-  verifyBtn.disabled = false;
+  setUi();
 }
 
 function fail() {
   state = "failed";
   timerBar.style.opacity = "0";
-  statusEl.textContent = "Expired";
-  verifyBtn.textContent = "Try again";
+  statusEl.textContent = "Expired — click to retry";
+  setUi();
 }
 function reset() {
   if (worker) { worker.terminate(); worker = null; }
   state = "idle";
+  clicks = [];
   timerBar.style.opacity = "0";
-  statusEl.textContent = "Press to start";
-  verifyBtn.textContent = "Begin challenge";
-  verifyBtn.disabled = false;
+  statusEl.textContent = "Verify you are human";
+  setUi();
 }
 canvas.addEventListener("click", (e) => {
   if (state !== "active") return;
@@ -187,6 +190,11 @@ canvas.addEventListener("click", (e) => {
     if (Math.sqrt(dx * dx + dy * dy) <= TARGET_R + 4) {
       t.hit = true;
       remaining--;
+      clicks.push({
+        x: Math.round(cx),
+        y: Math.round(cy),
+        t: Math.round(Date.now() - puzzleStart),
+      });
       statusEl.textContent = remaining > 0 ? `${remaining} left` : "";
       if (remaining === 0) puzzleSolved();
       break;
@@ -194,13 +202,10 @@ canvas.addEventListener("click", (e) => {
   }
 });
 
-verifyBtn.addEventListener("click", () => {
-  if (state === "idle" || state === "success" || state === "failed") {
-    if (state !== "idle") reset();
-    startChallenge();
-  } else {
-    reset();
-  }
+checkbox.addEventListener("click", () => {
+  if (state === "success") return;
+  if (state === "failed") { reset(); startChallenge(); return; }
+  if (state === "idle") startChallenge();
 });
 
 reset();

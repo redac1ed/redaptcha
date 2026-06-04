@@ -7,19 +7,29 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main class="widget">
-      <h1>redaptcha</h1>
-      <p class="subtitle">test page</p>
-
-      <div class="puzzle">
-        <canvas id="puzzle" width="320" height="240"></canvas>
-        <div class="timer-wrap"><div id="timer-bar" class="timer-bar"></div></div>
+    <main class="page">
+      <h1 class="page-title">redaptcha</h1>
+      <p class="page-sub">test page</p>
+      <div class="captcha" id="captcha">
+        <button class="cb-box" id="checkbox" aria-label="Verify you are human">
+          <span class="cb-mark" id="cb-mark"></span>
+          <span class="cb-spinner" id="cb-spinner"></span>
+        </button>
+        <div class="cb-label">
+          <span id="status">Verify you are human</span>
+        </div>
+        <div class="cb-brand">
+          <span class="brand-name">redaptcha</span>
+          <span class="brand-sub">Privacy · Terms</span>
+        </div>
       </div>
-
-      <button id="verify" class="verify-btn">Begin challenge</button>
-      <p id="status" class="status">Press to start</p>
+      <div class="puzzle-panel" id="puzzle-panel">
+        <div class="puzzle">
+          <canvas id="puzzle" width="320" height="240"></canvas>
+          <div class="timer-wrap"><div id="timer-bar" class="timer-bar"></div></div>
+        </div>
+      </div>
     </main>
-
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

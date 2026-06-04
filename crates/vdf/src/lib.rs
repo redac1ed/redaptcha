@@ -24,6 +24,15 @@ impl VdfParams {
         let h = BigUint::from_bytes_be(&hasher.finalize());
         (h % (&self.modulus - 2u32)) + 2u32
     }
+    pub fn challenge_element_with_trajectory(&self, seed: &[u8], trajectory: &[u8]) -> BigUint {
+        let mut hasher = Sha256::new();
+        hasher.update(b"redaptcha-vdf-x");
+        hasher.update(seed);
+        hasher.update(trajectory);
+        let h = BigUint::from_bytes_be(&hasher.finalize());
+        (h % (&self.modulus - 2u32)) + 2u32
+    }
+
     pub fn eval(&self, x: &BigUint, t: u64) -> VdfProof {
         let mut y = x.clone();
         for _ in 0..t {
