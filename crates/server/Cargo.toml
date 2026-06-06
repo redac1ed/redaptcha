@@ -19,5 +19,11 @@ hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 num-bigint.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
 vdf = { path = "../vdf" }
 core-types = { path = "../core" }
+subtle = "2"
+num-prime = "0.4"
+num-integer = "0.1"
+time = { version = "0.3", features = ["formatting"] }

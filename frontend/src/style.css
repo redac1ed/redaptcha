@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Monoton&display=swap');
+
 :root {
   font-family: system-ui, sans-serif;
   color: #e2e8f0;
@@ -130,9 +132,10 @@ body {
 }
 
 .brand-name {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #f97316;
+  font-size: 1rem;
+  font-weight: 100;
+  color: #16c0f9;
+  font-family: "Monoton", sans-serif;
 }
 
 .brand-sub {
@@ -150,7 +153,7 @@ body {
 }
 
 .puzzle-panel.is-open {
-  max-height: 300px;
+  max-height: 320px;
   opacity: 1;
   margin-top: 10px;
 }
@@ -164,6 +167,8 @@ body {
 
 canvas {
   display: block;
+  width: 100%;
+  height: auto;
 }
 
 .timer-wrap {
@@ -178,4 +183,34 @@ canvas {
   background: #4ade80;
   opacity: 0;
   transition: opacity 0.2s;
+}
+
+.restricted { 
+  position: relative; 
+  margin-top: 24px; 
+  border-radius: 12px; 
+  overflow: hidden; 
+}
+
+.restricted-content {
+  filter: blur(8px); 
+  pointer-events: none; 
+  padding: 20px; 
+}
+
+.lock-overlay {
+  position: absolute;
+  inset: 0; 
+  display: grid; 
+  place-items: center;
+  background: rgba(11,15,26,.6); 
+}
+
+.restricted.is-unlocked .restricted-content {
+   filter: none;
+  pointer-events: auto; 
+}
+
+.restricted.is-unlocked .lock-overlay {
+ display: none; 
 }

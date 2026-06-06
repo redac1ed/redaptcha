@@ -1,11 +1,25 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Challenge {
     pub id: String,
     pub seed_hex: String,
     pub modulus_hex: String,
     pub difficulty: u64,
+    pub frames_b64: String,
+    pub frame_count: u32,
+    pub frame_dt_ms: f64,
+    pub puzzle_w: f64,
+    pub puzzle_h: f64,
+    pub sig: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Mover {
+    pub x0: f64,
+    pub y0: f64,
+    pub vx: f64,
+    pub vy: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,11 +30,30 @@ pub struct Click {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrailPoint {
+    pub x: f64,
+    pub y: f64,
+    pub t: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChallengeRequest {
+    #[serde(default)]
+    pub site_key: String,
+    #[serde(default)]
+    pub hostname: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Solution {
     pub challenge_id: String,
     pub output_hex: String,
     pub proof_hex: String,
     pub clicks: Vec<Click>,
+    #[serde(default)]
+    pub trail: Vec<TrailPoint>,
+    #[serde(default)]
+    pub sig: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -1,80 +1,113 @@
+mod difficulty;
+mod setup;
+mod token;
+
 use axum::{
     extract::{ConnectInfo, State},
-    http::{HeaderValue, Method},
+    http::{header::CONTENT_TYPE, HeaderValue, Method},
     routing::post,
     Json, Router,
 };
-use core_types::{Challenge, Click, Solution, VerifyResponse};
-use hmac::{Hmac, Mac};
-use num_bigint::BigUint;
-use rand::RngCore;
-use sha2::Sha256;
 use std::{
     collections::HashMap,
+    io::Cursor,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use core_types::{Challenge, ChallengeRequest, Click, Mover, Solution, VerifyResponse};
+use difficulty::{difficulty_for, ClientProfile, FRAME_COUNT, FRAME_DT_MS};
+use image::{ImageEncoder, RgbaImage};
+use num_bigint::BigUint;
+use rand::{Rng, RngCore};
+use token::{now_secs, RedeemLog, TokenClaims, TOKEN_TTL_SECS};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 use vdf::{VdfParams, VdfProof};
 
-const MODULUS_HEX: &str =
-    "c7970ceedcc3b0754490201a7aa613cd73911081c790f5f1a8726f463550bb5b\
-     7ff0db8e1ea1189ec72f93d1650011bd721aeeacc2acde32a04107f0648c2813\
-     a31f5b0b7765ff8b44b4b6ffc93384b646eb09c7cf5e8592d40ea33c80039f35\
-     b4f14a04b51f7bfd781be4d1673164ba8eb991c2c4d730bbbe35f592bdef524a";
-const DIFFICULTY: u64 = 50_000;
+const MODULUS_BITS: u64 = 2048;
 const TTL: Duration = Duration::from_secs(120);
-const PUZZLE_W: f64 = 320.0;
-const PUZZLE_H: f64 = 240.0;
+const PUZZLE_W: u32 = 320;
+const PUZZLE_H: u32 = 240;
 const EXPECTED_CLICKS: usize = 3;
+const TARGET_R: f64 = 16.0;
+const HIT_R: f64 = 22.0;
+const MIN_TARGET_SEP: f64 = 60.0;
+const NOISE_COUNT: usize = 110;
 const MIN_INTER_CLICK_MS: f64 = 40.0;
 const MIN_TOTAL_MS: f64 = 250.0;
 const MAX_TOTAL_MS: f64 = 15_000.0;
-const RATE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_CHALLENGES_PER_WINDOW: u32 = 20;
-
-type HmacSha256 = Hmac<Sha256>;
+const ORBIT_AMP: f64 = 26.0;
+const ORBIT_TURNS: f64 = 1.0;
 
 struct Stored {
     seed_hex: String,
     difficulty: u64,
     born: Instant,
-    ip: String,
+    created_ts: u64,
+    movers: Vec<Mover>,
+    issuer_ip: String,
 }
-struct RateEntry {
-    count: u32,
-    window_start: Instant,
-    active: u32,
-}
+
 struct AppState {
     store: Mutex<HashMap<String, Stored>>,
-    rate: Mutex<HashMap<String, RateEntry>>,
+    profiles: Mutex<HashMap<String, ClientProfile>>,
     params: VdfParams,
+    modulus_hex: String,
     token_key: Vec<u8>,
+    challenge_key: Vec<u8>,
+    redeem_log: Mutex<RedeemLog>,
+}
+
+#[derive(serde::Deserialize)]
+struct ContentReq {
+    token: String,
+}
+
+#[derive(serde::Serialize)]
+struct ContentResp {
+    ok: bool,
+    content: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
     let mut key = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
+    let mut chal_key = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut chal_key);
+    println!("generating {}-bit trusted-setup modulus...", MODULUS_BITS);
+    let gen_start = Instant::now();
+    let setup = setup::generate(MODULUS_BITS);
+    println!(
+        "modulus ready: {} bits in {:?} (prime factors discarded)",
+        setup.bits,
+        gen_start.elapsed()
+    );
     let state = Arc::new(AppState {
         store: Mutex::new(HashMap::new()),
-        rate: Mutex::new(HashMap::new()),
-        params: VdfParams::from_modulus_hex(MODULUS_HEX),
+        profiles: Mutex::new(HashMap::new()),
+        params: VdfParams::from_modulus_hex(&setup.modulus_hex),
+        modulus_hex: setup.modulus_hex,
         token_key: key,
+        challenge_key: chal_key,
+        redeem_log: Mutex::new(RedeemLog::new()),
     });
     let cors = CorsLayer::new()
         .allow_origin([
             "http://localhost:5173".parse::<HeaderValue>().unwrap(),
             "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5174".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5174".parse::<HeaderValue>().unwrap(),
         ])
-        .allow_methods([Method::POST]);
+        .allow_methods([Method::POST, Method::GET])
+        .allow_headers([CONTENT_TYPE]);
     let app = Router::new()
         .route("/challenge", post(issue))
         .route("/verify", post(verify))
+        .route("/content", post(content))
         .layer(cors)
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -87,18 +120,6 @@ async fn main() {
     .unwrap();
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-}
-
-fn sign_token(key: &[u8], challenge_id: &str, exp: u64) -> String {
-    let payload = format!("{}.{}", challenge_id, exp);
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
-    mac.update(payload.as_bytes());
-    let sig = hex::encode(mac.finalize().into_bytes());
-    format!("{}.{}", payload, sig)
-}
-
 fn err(message: &str) -> Json<VerifyResponse> {
     Json(VerifyResponse {
         ok: false,
@@ -107,27 +128,87 @@ fn err(message: &str) -> Json<VerifyResponse> {
     })
 }
 
-fn rate_ok(state: &AppState, ip: &str, rate: &mut HashMap<String, RateEntry>) -> bool {
-    let now = Instant::now();
-    let entry = rate.entry(ip.to_string()).or_insert(RateEntry {
-        count: 0,
-        window_start: now,
-        active: 0,
-    });
-    if now.duration_since(entry.window_start) > RATE_WINDOW {
-        entry.count = 0;
-        entry.window_start = now;
+fn gen_movers() -> Vec<Mover> {
+    let mut rng = rand::thread_rng();
+    let mut movers: Vec<Mover> = Vec::with_capacity(EXPECTED_CLICKS);
+    let margin = TARGET_R + ORBIT_AMP;
+    let mut guard = 0;
+    while movers.len() < EXPECTED_CLICKS && guard < 1000 {
+        guard += 1;
+        let x = rng.gen_range(margin..(PUZZLE_W as f64 - margin));
+        let y = rng.gen_range(margin..(PUZZLE_H as f64 - margin));
+        if movers
+            .iter()
+            .all(|m| ((m.x0 - x).powi(2) + (m.y0 - y).powi(2)).sqrt() >= MIN_TARGET_SEP)
+        {
+            let phase = rng.gen_range(0.0..std::f64::consts::TAU);
+            let dir = if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
+            movers.push(Mover {
+                x0: x,
+                y0: y,
+                vx: phase,
+                vy: dir,
+            });
+        }
     }
-    if entry.active >= 1 {
-        return false;
+    movers
+}
+
+fn pos_at(m: &Mover, t: f64) -> (f64, f64) {
+    let t_total = FRAME_COUNT as f64 * FRAME_DT_MS;
+    let theta = m.vx + m.vy * std::f64::consts::TAU * ORBIT_TURNS * t / t_total;
+    (m.x0 + ORBIT_AMP * theta.cos(), m.y0 + ORBIT_AMP * theta.sin())
+}
+
+fn fill_circle(img: &mut RgbaImage, cx: f64, cy: f64, r: f64, color: [u8; 4]) {
+    let r2 = r * r;
+    let w = img.width() as f64;
+    let h = img.height() as f64;
+    let x0 = (cx - r).floor().max(0.0) as u32;
+    let x1 = (cx + r).ceil().min(w) as u32;
+    let y0 = (cy - r).floor().max(0.0) as u32;
+    let y1 = (cy + r).ceil().min(h) as u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let dx = x as f64 + 0.5 - cx;
+            let dy = y as f64 + 0.5 - cy;
+            if dx * dx + dy * dy <= r2 {
+                img.put_pixel(x, y, image::Rgba(color));
+            }
+        }
     }
-    if entry.count >= MAX_CHALLENGES_PER_WINDOW {
-        return false;
+}
+
+fn render_frames(movers: &[Mover]) -> String {
+    let mut rng = rand::thread_rng();
+    let cols = FRAME_COUNT;
+    let strip_w = PUZZLE_W * cols;
+    let mut img = RgbaImage::from_pixel(strip_w, PUZZLE_H, image::Rgba([0, 16, 61, 255]));
+    let decoys: Vec<(f64, f64)> = (0..NOISE_COUNT)
+        .map(|_| {
+            (
+                rng.gen_range(0.0..PUZZLE_W as f64),
+                rng.gen_range(0.0..PUZZLE_H as f64),
+            )
+        })
+        .collect();
+    for f in 0..cols {
+        let t = f as f64 * FRAME_DT_MS;
+        let ox = f * PUZZLE_W;
+        for &(dx, dy) in &decoys {
+            fill_circle(&mut img, ox as f64 + dx, dy, 2.0, [255, 94, 140, 255]);
+        }
+        for m in movers {
+            let (x, y) = pos_at(m, t);
+            fill_circle(&mut img, ox as f64 + x, y, TARGET_R, [22, 151, 249, 255]);
+            fill_circle(&mut img, ox as f64 + x, y, TARGET_R * 0.45, [237, 255, 253, 255]);
+        }
     }
-    entry.count += 1;
-    entry.active += 1;
-    let _ = state;
-    true
+    let mut buf = Vec::new();
+    image::codecs::png::PngEncoder::new(Cursor::new(&mut buf))
+        .write_image(img.as_raw(), strip_w, PUZZLE_H, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    B64.encode(&buf)
 }
 
 fn validate_clicks(clicks: &[Click]) -> Result<(), &'static str> {
@@ -139,7 +220,7 @@ fn validate_clicks(clicks: &[Click]) -> Result<(), &'static str> {
         if !c.x.is_finite() || !c.y.is_finite() || !c.t.is_finite() {
             return Err("non-finite click");
         }
-        if c.x < 0.0 || c.x > PUZZLE_W || c.y < 0.0 || c.y > PUZZLE_H {
+        if c.x < 0.0 || c.x > PUZZLE_W as f64 || c.y < 0.0 || c.y > PUZZLE_H as f64 {
             return Err("click out of bounds");
         }
         if c.t <= last_t {
@@ -157,21 +238,61 @@ fn validate_clicks(clicks: &[Click]) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn grade_clicks(movers: &[Mover], clicks: &[Click]) -> Result<(), &'static str> {
+    let mut used = vec![false; movers.len()];
+    for c in clicks {
+        let frame = (c.t / FRAME_DT_MS).floor() as i64;
+        let seen_frame = frame.rem_euclid(FRAME_COUNT as i64) as f64;
+        let t_seen = seen_frame * FRAME_DT_MS;
+        let mut matched = None;
+        for (i, m) in movers.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let (tx, ty) = pos_at(m, t_seen);
+            let d = ((c.x - tx).powi(2) + (c.y - ty).powi(2)).sqrt();
+            if d <= HIT_R {
+                matched = Some(i);
+                break;
+            }
+        }
+        match matched {
+            Some(i) => used[i] = true,
+            None => return Err("puzzle not solved"),
+        }
+    }
+    if used.iter().all(|&u| u) {
+        Ok(())
+    } else {
+        Err("puzzle not solved")
+    }
+}
+
 async fn issue(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(s): State<Arc<AppState>>,
+    Json(_req): Json<ChallengeRequest>,
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
     let ip = addr.ip().to_string();
-    {
-        let mut rate = s.rate.lock().await;
-        if !rate_ok(&s, &ip, &mut rate) {
+    let now = Instant::now();
+    let difficulty = {
+        let mut profiles = s.profiles.lock().await;
+        let profile = profiles
+            .entry(ip.clone())
+            .or_insert_with(|| ClientProfile::new(now));
+        profile.roll_window(now);
+        if !profile.register_request() {
             return Err(err("rate limited"));
         }
-    }
+        difficulty_for(profile)
+    };
     let id = Uuid::new_v4().to_string();
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     let seed_hex = hex::encode(seed);
+    let movers = gen_movers();
+    let frames_b64 = render_frames(&movers);
+    let created_ts = now_secs();
     {
         let mut store = s.store.lock().await;
         store.retain(|_, v| v.born.elapsed() <= TTL);
@@ -179,55 +300,149 @@ async fn issue(
             id.clone(),
             Stored {
                 seed_hex: seed_hex.clone(),
-                difficulty: DIFFICULTY,
-                born: Instant::now(),
-                ip,
+                difficulty,
+                born: now,
+                created_ts,
+                movers: movers.clone(),
+                issuer_ip: ip.clone(),
             },
         );
     }
+    let canonical = format!("{}|{}|{}|{}", id, seed_hex, difficulty, ip);
+    let sig = token::sign_blob(&s.challenge_key, &canonical);
     Ok(Json(Challenge {
         id,
         seed_hex,
-        modulus_hex: MODULUS_HEX.to_string(),
-        difficulty: DIFFICULTY,
+        modulus_hex: s.modulus_hex.clone(),
+        difficulty,
+        frames_b64,
+        frame_count: FRAME_COUNT,
+        frame_dt_ms: FRAME_DT_MS,
+        puzzle_w: PUZZLE_W as f64,
+        puzzle_h: PUZZLE_H as f64,
+        sig,
     }))
 }
 
-fn release_active(rate: &mut HashMap<String, RateEntry>, ip: &str) {
-    if let Some(e) = rate.get_mut(ip) {
-        if e.active > 0 {
-            e.active -= 1;
+async fn content(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<ContentReq>,
+) -> Json<ContentResp> {
+    let ip = addr.ip().to_string();
+    {
+        let now = Instant::now();
+        let mut profiles = s.profiles.lock().await;
+        let profile = profiles
+            .entry(ip)
+            .or_insert_with(|| ClientProfile::new(now));
+        profile.roll_window(now);
+        if !profile.register_verify(now) {
+            return Json(ContentResp {
+                ok: false,
+                content: None,
+            });
         }
     }
+    let Some(claims) = token::verify(&s.token_key, &req.token) else {
+        return Json(ContentResp { ok: false, content: None });
+    };
+    let _ = claims;
+    {
+        let mut log = s.redeem_log.lock().await;
+        if !log.try_consume(&req.token) {
+            return Json(ContentResp { ok: false, content: None });
+        }
+    }
+    Json(ContentResp {
+        ok: true,
+        content: Some("unlocked".into()),
+    })
 }
 
 async fn verify(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(s): State<Arc<AppState>>,
     Json(sol): Json<Solution>,
 ) -> Json<VerifyResponse> {
+    let ip = addr.ip().to_string();
     if sol.output_hex.len() > 4096 || sol.proof_hex.len() > 4096 {
         return err("input too large");
     }
-    let (seed, difficulty, ip) = {
+    {
+        let now = Instant::now();
+        let mut profiles = s.profiles.lock().await;
+        let profile = profiles
+            .entry(ip.clone())
+            .or_insert_with(|| ClientProfile::new(now));
+        profile.roll_window(now);
+        if !profile.register_verify(now) {
+            return err("rate limited");
+        }
+    }
+    let (seed, difficulty, movers, created_ts, issuer_ip) = {
         let mut store = s.store.lock().await;
         let stored = match store.get(&sol.challenge_id) {
             Some(c) => c,
             None => return err("unknown challenge"),
         };
         if stored.born.elapsed() > TTL {
-            let ip = stored.ip.clone();
             store.remove(&sol.challenge_id);
-            let mut rate = s.rate.lock().await;
-            release_active(&mut rate, &ip);
             return err("challenge expired");
         }
         (
             hex::decode(&stored.seed_hex).unwrap(),
             stored.difficulty,
-            stored.ip.clone(),
+            stored.movers.clone(),
+            stored.created_ts,
+            stored.issuer_ip.clone(),
         )
     };
+    if issuer_ip != ip {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.5).await;
+        return err("challenge bound to another client");
+    }
+    let canonical = format!(
+        "{}|{}|{}|{}",
+        sol.challenge_id,
+        hex::encode(&seed),
+        difficulty,
+        issuer_ip
+    );
+    if !token::verify_blob(&s.challenge_key, &canonical, &sol.sig) {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.5).await;
+        return err("invalid challenge signature");
+    }
     if let Err(m) = validate_clicks(&sol.clicks) {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.3).await;
+        return err(m);
+    }
+    let trail: Vec<(f64, f64, f64)> = sol.trail.iter().map(|p| (p.x, p.y, p.t)).collect();
+    match difficulty::grade_trail(&trail) {
+        Ok(weight) => {
+            if weight > 0.0 {
+                flag_profile(&s, &ip, weight).await;
+            }
+        }
+        Err(m) => {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.4).await;
+            return err(m);
+        }
+    }
+    if let Some(weight) = difficulty::classify_timing(
+        sol.clicks.last().map(|c| c.t).unwrap_or(0.0)
+            - sol.clicks.first().map(|c| c.t).unwrap_or(0.0),
+        sol.clicks.len(),
+    ) {
+        flag_profile(&s, &ip, weight).await;
+    }
+    if let Err(m) = grade_clicks(&movers, &sol.clicks) {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.3).await;
         return err(m);
     }
     let mut trajectory = String::new();
@@ -252,16 +467,55 @@ async fn verify(
     let ok = s.params.verify(&x, difficulty, &vdf_proof);
     if ok {
         s.store.lock().await.remove(&sol.challenge_id);
-        let mut rate = s.rate.lock().await;
-        release_active(&mut rate, &ip);
+        record_profile_success(&s, &ip).await;
+        let iat = now_secs();
+        let claims = TokenClaims {
+            challenge_id: sol.challenge_id.clone(),
+            site_key: String::new(),
+            hostname: String::new(),
+            issued_at: created_ts.max(iat.saturating_sub(TTL.as_secs())),
+            expires_at: iat + TOKEN_TTL_SECS,
+        };
+        let signed = token::sign(&s.token_key, &claims);
+        Json(VerifyResponse {
+            ok: true,
+            token: Some(signed),
+            message: "verified".into(),
+        })
+    } else {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.2).await;
+        Json(VerifyResponse {
+            ok: false,
+            token: None,
+            message: "proof invalid".into(),
+        })
     }
-    Json(VerifyResponse {
-        ok,
-        token: if ok {
-            Some(sign_token(&s.token_key, &sol.challenge_id, now_secs() + 300))
-        } else {
-            None
-        },
-        message: if ok { "verified".into() } else { "proof invalid".into() },
-    })
+}
+
+async fn flag_profile(s: &Arc<AppState>, ip: &str, weight: f64) {
+    let now = Instant::now();
+    let mut profiles = s.profiles.lock().await;
+    let p = profiles
+        .entry(ip.to_string())
+        .or_insert_with(|| ClientProfile::new(now));
+    p.flag_anomaly(weight);
+}
+
+async fn record_profile_success(s: &Arc<AppState>, ip: &str) {
+    let now = Instant::now();
+    let mut profiles = s.profiles.lock().await;
+    let p = profiles
+        .entry(ip.to_string())
+        .or_insert_with(|| ClientProfile::new(now));
+    p.record_success();
+}
+
+async fn record_profile_failure(s: &Arc<AppState>, ip: &str) {
+    let now = Instant::now();
+    let mut profiles = s.profiles.lock().await;
+    let p = profiles
+        .entry(ip.to_string())
+        .or_insert_with(|| ClientProfile::new(now));
+    p.record_failure();
 }
