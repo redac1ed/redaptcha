@@ -1,4 +1,4 @@
-const SERVER = "http://localhost:3000";
+const SERVER = import.meta.env.VITE_SERVER ?? "";
 const SITE_KEY = "rk_site_demo";
 const canvas = document.getElementById("puzzle");
 const ctx = canvas.getContext("2d");

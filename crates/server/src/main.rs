@@ -24,6 +24,7 @@ use rand::{Rng, RngCore};
 use token::{now_secs, RedeemLog, TokenClaims, TOKEN_TTL_SECS};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 use vdf::{VdfParams, VdfProof};
 
@@ -104,14 +105,22 @@ async fn main() {
         ])
         .allow_methods([Method::POST, Method::GET])
         .allow_headers([CONTENT_TYPE]);
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/challenge", post(issue))
         .route("/verify", post(verify))
-        .route("/content", post(content))
-        .layer(cors)
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("listening on http://localhost:3000");
+        .route("/content", post(content));
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "frontend/dist".to_string());
+    if std::path::Path::new(&static_dir).is_dir() {
+        let index = format!("{static_dir}/index.html");
+        app = app.fallback_service(
+            ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)),
+        );
+    }
+    let app = app.layer(cors).with_state(state);
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    println!("listening on http://{addr}");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
