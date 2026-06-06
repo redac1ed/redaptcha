@@ -13,6 +13,13 @@ pub const MIN_TRAIL_POINTS: usize = 6;
 pub const MIN_TRAIL_PATH: f64 = 40.0;
 pub const MIN_REACTION_MS: f64 = 120.0;
 pub const MAX_TELEPORT_FRAC: f64 = 0.6;
+pub const GLOBAL_RATE_WINDOW: Duration = Duration::from_secs(60);
+pub const MAX_GLOBAL_PER_WINDOW: u32 = 600;
+
+pub struct GlobalLimiter {
+    pub count: u32,
+    pub window_start: Instant,
+}
 
 #[derive(Clone)]
 pub struct ClientProfile {
@@ -32,6 +39,19 @@ pub struct TrailStats {
     pub reaction_ms: f64,
     pub max_step: f64,
     pub span: f64,
+}
+
+impl GlobalLimiter {
+    pub fn new(now: Instant) -> Self { GlobalLimiter { count: 0, window_start: now } }
+    pub fn allow(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.window_start) > GLOBAL_RATE_WINDOW {
+            self.count = 0;
+            self.window_start = now;
+        }
+        if self.count >= MAX_GLOBAL_PER_WINDOW { return false; }
+        self.count += 1;
+        true
+    }
 }
 
 impl ClientProfile {

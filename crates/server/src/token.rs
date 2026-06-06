@@ -117,6 +117,21 @@ pub fn sign_blob(key: &[u8], data: &str) -> String {
     b64url(&mac.finalize().into_bytes())
 }
 
+pub fn derive_bytes(key: &[u8], label: &str, out: &mut [u8]) {
+    let mut counter: u32 = 0;
+    let mut pos = 0;
+    while pos < out.len() {
+        let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
+        mac.update(label.as_bytes());
+        mac.update(&counter.to_be_bytes());
+        let block = mac.finalize().into_bytes();
+        let take = (out.len() - pos).min(block.len());
+        out[pos..pos + take].copy_from_slice(&block[..take]);
+        pos += take;
+        counter += 1;
+    }
+}
+
 pub fn verify_blob(key: &[u8], data: &str, sig: &str) -> bool {
     let expected = {
         let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");

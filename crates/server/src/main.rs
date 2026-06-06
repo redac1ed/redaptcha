@@ -17,7 +17,7 @@ use std::{
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use core_types::{Challenge, ChallengeRequest, Click, Mover, Solution, VerifyResponse};
-use difficulty::{difficulty_for, ClientProfile, FRAME_COUNT, FRAME_DT_MS};
+use difficulty::{difficulty_for, ClientProfile, GlobalLimiter, FRAME_COUNT, FRAME_DT_MS};
 use image::{ImageEncoder, RgbaImage};
 use num_bigint::BigUint;
 use rand::{Rng, RngCore};
@@ -48,7 +48,6 @@ struct Stored {
     difficulty: u64,
     born: Instant,
     created_ts: u64,
-    movers: Vec<Mover>,
     issuer_ip: String,
 }
 
@@ -60,6 +59,7 @@ struct AppState {
     token_key: Vec<u8>,
     challenge_key: Vec<u8>,
     redeem_log: Mutex<RedeemLog>,
+    global: Mutex<GlobalLimiter>,
 }
 
 #[derive(serde::Deserialize)]
@@ -95,6 +95,7 @@ async fn main() {
         token_key: key,
         challenge_key: chal_key,
         redeem_log: Mutex::new(RedeemLog::new()),
+        global: Mutex::new(GlobalLimiter::new(Instant::now())),
     });
     let cors = CorsLayer::new()
         .allow_origin([
@@ -137,27 +138,25 @@ fn err(message: &str) -> Json<VerifyResponse> {
     })
 }
 
-fn gen_movers() -> Vec<Mover> {
-    let mut rng = rand::thread_rng();
+fn gen_movers_from(key: &[u8], challenge_id: &str) -> Vec<Mover> {
+    let mut seed = [0u8; 32];
+    token::derive_bytes(key, &format!("movers|{challenge_id}"), &mut seed);
+    let mut st: u64 = u64::from_le_bytes(seed[..8].try_into().unwrap()) | 1;
+    let mut next = || {
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        (st >> 11) as f64 / (1u64 << 53) as f64
+    };
     let mut movers: Vec<Mover> = Vec::with_capacity(EXPECTED_CLICKS);
     let margin = TARGET_R + ORBIT_AMP;
     let mut guard = 0;
     while movers.len() < EXPECTED_CLICKS && guard < 1000 {
         guard += 1;
-        let x = rng.gen_range(margin..(PUZZLE_W as f64 - margin));
-        let y = rng.gen_range(margin..(PUZZLE_H as f64 - margin));
-        if movers
-            .iter()
-            .all(|m| ((m.x0 - x).powi(2) + (m.y0 - y).powi(2)).sqrt() >= MIN_TARGET_SEP)
-        {
-            let phase = rng.gen_range(0.0..std::f64::consts::TAU);
-            let dir = if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
-            movers.push(Mover {
-                x0: x,
-                y0: y,
-                vx: phase,
-                vy: dir,
-            });
+        let x = margin + next() * (PUZZLE_W as f64 - 2.0 * margin);
+        let y = margin + next() * (PUZZLE_H as f64 - 2.0 * margin);
+        if movers.iter().all(|m| ((m.x0 - x).powi(2) + (m.y0 - y).powi(2)).sqrt() >= MIN_TARGET_SEP) {
+            let phase = next() * std::f64::consts::TAU;
+            let dir = if next() < 0.5 { 1.0 } else { -1.0 };
+            movers.push(Mover { x0: x, y0: y, vx: phase, vy: dir });
         }
     }
     movers
@@ -284,6 +283,9 @@ async fn issue(
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
     let ip = addr.ip().to_string();
     let now = Instant::now();
+    if !s.global.lock().await.allow(now) {
+        return Err(err("server busy"));
+    }
     let difficulty = {
         let mut profiles = s.profiles.lock().await;
         let profile = profiles
@@ -299,7 +301,7 @@ async fn issue(
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     let seed_hex = hex::encode(seed);
-    let movers = gen_movers();
+    let movers = gen_movers_from(&s.challenge_key, &id);
     let frames_b64 = render_frames(&movers);
     let created_ts = now_secs();
     {
@@ -312,7 +314,6 @@ async fn issue(
                 difficulty,
                 born: now,
                 created_ts,
-                movers: movers.clone(),
                 issuer_ip: ip.clone(),
             },
         );
@@ -378,6 +379,9 @@ async fn verify(
     if sol.output_hex.len() > 4096 || sol.proof_hex.len() > 4096 {
         return err("input too large");
     }
+    if !s.global.lock().await.allow(Instant::now()) {
+        return err("server busy");
+    }
     {
         let now = Instant::now();
         let mut profiles = s.profiles.lock().await;
@@ -389,7 +393,7 @@ async fn verify(
             return err("rate limited");
         }
     }
-    let (seed, difficulty, movers, created_ts, issuer_ip) = {
+    let (seed, difficulty, created_ts, issuer_ip) = {
         let mut store = s.store.lock().await;
         let stored = match store.get(&sol.challenge_id) {
             Some(c) => c,
@@ -402,7 +406,6 @@ async fn verify(
         (
             hex::decode(&stored.seed_hex).unwrap(),
             stored.difficulty,
-            stored.movers.clone(),
             stored.created_ts,
             stored.issuer_ip.clone(),
         )
@@ -423,8 +426,7 @@ async fn verify(
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.5).await;
         return err("invalid challenge signature");
-    }
-    if let Err(m) = validate_clicks(&sol.clicks) {
+    }    let movers = gen_movers_from(&s.challenge_key, &sol.challenge_id);    if let Err(m) = validate_clicks(&sol.clicks) {
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.3).await;
         return err(m);
