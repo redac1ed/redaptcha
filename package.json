@@ -1,8 +1,12 @@
 {
-  "name": "redaptcha-root",
+  "name": "redaptcha",
   "private": true,
   "version": "0.1.0",
   "scripts": {
     "build": "npm --prefix frontend install && npm --prefix frontend run build"
+  },
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
   }
 }

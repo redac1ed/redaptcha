@@ -75,23 +75,32 @@ struct ContentResp {
 
 #[tokio::main]
 async fn main() {
-    let mut key = vec![0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
-    let mut chal_key = vec![0u8; 32];
-    rand::thread_rng().fill_bytes(&mut chal_key);
-    println!("generating {}-bit trusted-setup modulus...", MODULUS_BITS);
-    let gen_start = Instant::now();
-    let setup = setup::generate(MODULUS_BITS);
-    println!(
-        "modulus ready: {} bits in {:?} (prime factors discarded)",
-        setup.bits,
-        gen_start.elapsed()
-    );
+    let _ = dotenvy::from_filename(".env.local");
+    let key = load_or_gen_key("REDAPTCHA_TOKEN_KEY");
+    let chal_key = load_or_gen_key("REDAPTCHA_CHALLENGE_KEY");
+    let modulus_hex = match std::env::var("REDAPTCHA_MODULUS_HEX") {
+        Ok(h) if !h.trim().is_empty() => {
+            println!("using persisted modulus from env ({} hex chars)", h.trim().len());
+            h.trim().to_string()
+        }
+        _ => {
+            println!("generating {}-bit trusted-setup modulus...", MODULUS_BITS);
+            let gen_start = Instant::now();
+            let setup = setup::generate(MODULUS_BITS);
+            println!(
+                "modulus ready: {} bits in {:?} (prime factors discarded)",
+                setup.bits,
+                gen_start.elapsed()
+            );
+            println!("REDAPTCHA_MODULUS_HEX={}  <- set this in your deploy config to persist across restarts", setup.modulus_hex);
+            setup.modulus_hex
+        }
+    };
     let state = Arc::new(AppState {
         store: Mutex::new(HashMap::new()),
         profiles: Mutex::new(HashMap::new()),
-        params: VdfParams::from_modulus_hex(&setup.modulus_hex),
-        modulus_hex: setup.modulus_hex,
+        params: VdfParams::from_modulus_hex(&modulus_hex),
+        modulus_hex,
         token_key: key,
         challenge_key: chal_key,
         redeem_log: Mutex::new(RedeemLog::new()),
@@ -136,6 +145,21 @@ fn err(message: &str) -> Json<VerifyResponse> {
         token: None,
         message: message.into(),
     })
+}
+
+fn load_or_gen_key(var: &str) -> Vec<u8> {
+    if let Ok(b64) = std::env::var(var) {
+        if let Ok(bytes) = B64.decode(b64.trim()) {
+            if bytes.len() == 32 {
+                return bytes;
+            }
+        }
+        eprintln!("warning: {var} set but invalid (need base64 of 32 bytes); generating ephemeral key");
+    }
+    let mut k = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut k);
+    println!("{var}={}  <- set this in your deploy config to persist across restarts", B64.encode(&k));
+    k
 }
 
 fn gen_movers_from(key: &[u8], challenge_id: &str) -> Vec<Mover> {

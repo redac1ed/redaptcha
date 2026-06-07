@@ -217,6 +217,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -932,6 +938,7 @@ dependencies = [
  "axum",
  "base64",
  "core-types",
+ "dotenvy",
  "hex",
  "hmac",
  "image",
@@ -948,6 +955,7 @@ dependencies = [
  "tower-http",
  "uuid",
  "vdf",
+ "zeroize",
 ]
 
 [[package]]
@@ -1463,6 +1471,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 
 [[package]]
 name = "zmij"

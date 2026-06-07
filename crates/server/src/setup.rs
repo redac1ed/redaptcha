@@ -1,6 +1,7 @@
 use num_bigint::{BigUint, RandBigInt};
 use num_integer::Integer;
 use rand::rngs::OsRng;
+use zeroize::Zeroize; 
 
 const SMALL_PRIMES: [u32; 25] = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
@@ -25,12 +26,10 @@ pub fn generate(bits: u64) -> TrustedSetup {
     setup
 }
 
-fn drop_secret(value: BigUint) {
+fn drop_secret(mut value: BigUint) {
     let mut bytes = value.to_bytes_le();
-    for b in bytes.iter_mut() {
-        *b = 0;
-    }
-    std::hint::black_box(&bytes);
+    bytes.zeroize();
+    value.assign_from_slice(&[]);
     drop(value);
 }
 
@@ -44,6 +43,8 @@ fn random_prime(bits: u64) -> BigUint {
         if is_probable_prime(&candidate, 40) {
             return candidate;
         }
+        let mut bytes = candidate.to_bytes_le();
+        bytes.zeroize();
     }
 }
 

@@ -27,3 +27,5 @@ subtle = "2"
 num-prime = "0.4"
 num-integer = "0.1"
 time = { version = "0.3", features = ["formatting"] }
+zeroize = "1"
+dotenvy = "0.15"
