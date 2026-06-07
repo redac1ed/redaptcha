@@ -1,9 +1,10 @@
 mod difficulty;
 mod setup;
 mod token;
+mod store;
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{header::CONTENT_TYPE, HeaderValue, Method},
     routing::post,
     Json, Router,
@@ -21,7 +22,7 @@ use difficulty::{difficulty_for, ClientProfile, GlobalLimiter, FRAME_COUNT, FRAM
 use image::{ImageEncoder, RgbaImage};
 use num_bigint::BigUint;
 use rand::{Rng, RngCore};
-use token::{now_secs, RedeemLog, TokenClaims, TOKEN_TTL_SECS};
+use token::{now_secs, TokenClaims, TOKEN_TTL_SECS};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -58,7 +59,7 @@ struct AppState {
     modulus_hex: String,
     token_key: Vec<u8>,
     challenge_key: Vec<u8>,
-    redeem_log: Mutex<RedeemLog>,
+    redeem: store::RedeemStore,
     global: Mutex<GlobalLimiter>,
 }
 
@@ -96,6 +97,7 @@ async fn main() {
             setup.modulus_hex
         }
     };
+    let redeem = store::RedeemStore::from_env().await;
     let state = Arc::new(AppState {
         store: Mutex::new(HashMap::new()),
         profiles: Mutex::new(HashMap::new()),
@@ -103,7 +105,7 @@ async fn main() {
         modulus_hex,
         token_key: key,
         challenge_key: chal_key,
-        redeem_log: Mutex::new(RedeemLog::new()),
+        redeem,
         global: Mutex::new(GlobalLimiter::new(Instant::now())),
     });
     let cors = CorsLayer::new()
@@ -126,17 +128,22 @@ async fn main() {
             ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)),
         );
     }
-    let app = app.layer(cors).with_state(state);
+    let app = app
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(cors)
+        .with_state(state);
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
     println!("listening on http://{addr}");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .unwrap();
+    .expect("server error");
 }
 
 fn err(message: &str) -> Json<VerifyResponse> {
@@ -383,8 +390,7 @@ async fn content(
     };
     let _ = claims;
     {
-        let mut log = s.redeem_log.lock().await;
-        if !log.try_consume(&req.token) {
+        if !s.redeem.try_consume(&req.token).await {
             return Json(ContentResp { ok: false, content: None });
         }
     }

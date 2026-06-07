@@ -1,13 +1,11 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub const TOKEN_TTL_SECS: u64 = 300;
-pub const REDEEM_RETENTION: Duration = Duration::from_secs(600);
 
 pub struct TokenClaims {
     pub challenge_id: String,
@@ -80,37 +78,6 @@ pub fn verify(key: &[u8], token: &str) -> Option<TokenClaims> {
     })
 }
 
-pub struct RedeemLog {
-    seen: HashMap<String, Instant>,
-}
-
-impl RedeemLog {
-    pub fn new() -> Self {
-        RedeemLog {
-            seen: HashMap::new(),
-        }
-    }
-
-    pub fn gc(&mut self) {
-        self.seen.retain(|_, t| t.elapsed() < REDEEM_RETENTION);
-    }
-
-    pub fn try_consume(&mut self, token: &str) -> bool {
-        self.gc();
-        if self.seen.contains_key(token) {
-            return false;
-        }
-        self.seen.insert(token.to_string(), Instant::now());
-        true
-    }
-}
-
-impl Default for RedeemLog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub fn sign_blob(key: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
     mac.update(data.as_bytes());
@@ -150,7 +117,6 @@ pub fn verify_blob(key: &[u8], data: &str, sig: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn claims() -> TokenClaims {
         let iat = now_secs();
         TokenClaims {
@@ -196,11 +162,5 @@ mod tests {
         };
         let t = sign(&key, &c);
         assert!(verify(&key, &t).is_none());
-    }
-    #[test]
-    fn single_use_enforced() {
-        let mut log = RedeemLog::new();
-        assert!(log.try_consume("tok"));
-        assert!(!log.try_consume("tok"));
     }
 }

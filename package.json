@@ -1,9 +1,9 @@
 {
-  "name": "redaptcha",
+  "name": "redaptcha-root",
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "build": "npm --prefix frontend install && npm --prefix frontend run build"
+    "build": "npm --prefix frontend install --include=dev && npm --prefix frontend run build"
   },
   "engines": {
     "node": "20.x",

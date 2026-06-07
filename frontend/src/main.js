@@ -25,7 +25,7 @@ let trail = [];
 let framesImg = new Image();
 let framesLoaded = false;
 let frameCount = 0;
-let frameDt = 90;
+let frameDt = 50;
 let frameTiles = [];
 
 function setUi() {
