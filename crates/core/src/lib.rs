@@ -6,7 +6,8 @@ pub struct Challenge {
     pub seed_hex: String,
     pub modulus_hex: String,
     pub difficulty: u64,
-    pub frames_b64: String,
+    pub frames_b64: Vec<String>,
+    pub motions: Vec<PanelMotion>,
     pub frame_count: u32,
     pub frame_dt_ms: f64,
     pub puzzle_w: f64,
@@ -15,11 +16,23 @@ pub struct Challenge {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct PanelMotion {
+    pub cx: f64,
+    pub cy: f64,
+    pub amp: f64,
+    pub turns: f64,
+    pub phase: f64,
+    pub dir: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Mover {
     pub x0: f64,
     pub y0: f64,
     pub vx: f64,
     pub vy: f64,
+    pub amp: f64,
+    pub turns: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

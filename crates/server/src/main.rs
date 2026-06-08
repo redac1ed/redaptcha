@@ -17,11 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use core_types::{Challenge, ChallengeRequest, Click, Mover, Solution, VerifyResponse};
+use core_types::{Challenge, ChallengeRequest, Click, Mover, PanelMotion, Solution, VerifyResponse};
 use difficulty::{difficulty_for, ClientProfile, GlobalLimiter, FRAME_COUNT, FRAME_DT_MS};
 use image::{ImageEncoder, RgbaImage};
 use num_bigint::BigUint;
-use rand::{Rng, RngCore};
+use rand::{RngCore};
 use token::{now_secs, TokenClaims, TOKEN_TTL_SECS};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -36,13 +36,13 @@ const PUZZLE_H: u32 = 240;
 const EXPECTED_CLICKS: usize = 3;
 const TARGET_R: f64 = 16.0;
 const HIT_R: f64 = 22.0;
-const MIN_TARGET_SEP: f64 = 60.0;
-const NOISE_COUNT: usize = 110;
 const MIN_INTER_CLICK_MS: f64 = 40.0;
 const MIN_TOTAL_MS: f64 = 250.0;
 const MAX_TOTAL_MS: f64 = 15_000.0;
-const ORBIT_AMP: f64 = 26.0;
-const ORBIT_TURNS: f64 = 1.0;
+const ORBIT_AMP_MIN: f64 = 24.0;
+const ORBIT_AMP_MAX: f64 = 52.0;
+const ORBIT_TURNS_MIN: f64 = 0.5;
+const ORBIT_TURNS_MAX: f64 = 1.0;
 
 struct Stored {
     seed_hex: String,
@@ -178,25 +178,19 @@ fn gen_movers_from(key: &[u8], challenge_id: &str) -> Vec<Mover> {
         (st >> 11) as f64 / (1u64 << 53) as f64
     };
     let mut movers: Vec<Mover> = Vec::with_capacity(EXPECTED_CLICKS);
-    let margin = TARGET_R + ORBIT_AMP;
     let mut guard = 0;
     while movers.len() < EXPECTED_CLICKS && guard < 1000 {
         guard += 1;
+        let amp = ORBIT_AMP_MIN + next() * (ORBIT_AMP_MAX - ORBIT_AMP_MIN);
+        let margin = TARGET_R + amp * 1.4 + 4.0;
         let x = margin + next() * (PUZZLE_W as f64 - 2.0 * margin);
         let y = margin + next() * (PUZZLE_H as f64 - 2.0 * margin);
-        if movers.iter().all(|m| ((m.x0 - x).powi(2) + (m.y0 - y).powi(2)).sqrt() >= MIN_TARGET_SEP) {
-            let phase = next() * std::f64::consts::TAU;
-            let dir = if next() < 0.5 { 1.0 } else { -1.0 };
-            movers.push(Mover { x0: x, y0: y, vx: phase, vy: dir });
-        }
+        let phase = next() * std::f64::consts::TAU;
+        let dir = if next() < 0.5 { 1.0 } else { -1.0 };
+        let turns = ORBIT_TURNS_MIN + next() * (ORBIT_TURNS_MAX - ORBIT_TURNS_MIN);
+        movers.push(Mover { x0: x, y0: y, vx: phase, vy: dir, amp, turns });
     }
     movers
-}
-
-fn pos_at(m: &Mover, t: f64) -> (f64, f64) {
-    let t_total = FRAME_COUNT as f64 * FRAME_DT_MS;
-    let theta = m.vx + m.vy * std::f64::consts::TAU * ORBIT_TURNS * t / t_total;
-    (m.x0 + ORBIT_AMP * theta.cos(), m.y0 + ORBIT_AMP * theta.sin())
 }
 
 fn fill_circle(img: &mut RgbaImage, cx: f64, cy: f64, r: f64, color: [u8; 4]) {
@@ -218,30 +212,24 @@ fn fill_circle(img: &mut RgbaImage, cx: f64, cy: f64, r: f64, color: [u8; 4]) {
     }
 }
 
-fn render_frames(movers: &[Mover]) -> String {
-    let mut rng = rand::thread_rng();
+fn pos_at_center(m: &Mover, t: f64) -> (f64, f64) {
+    let t_total = FRAME_COUNT as f64 * FRAME_DT_MS;
+    let w = m.vy * std::f64::consts::TAU * m.turns * t / t_total;
+    let px = m.x0 + m.amp * (m.vx + w).sin() + m.amp * 0.4 * (m.vx + 2.3 * w).sin();
+    let py = m.y0 + m.amp * (m.vx * 1.7 + 1.3 * w).sin() + m.amp * 0.4 * (m.vx + 1.9 * w).cos();
+    (px, py)
+}
+
+fn render_panel(m: &Mover) -> String {
     let cols = FRAME_COUNT;
     let strip_w = PUZZLE_W * cols;
     let mut img = RgbaImage::from_pixel(strip_w, PUZZLE_H, image::Rgba([0, 16, 61, 255]));
-    let decoys: Vec<(f64, f64)> = (0..NOISE_COUNT)
-        .map(|_| {
-            (
-                rng.gen_range(0.0..PUZZLE_W as f64),
-                rng.gen_range(0.0..PUZZLE_H as f64),
-            )
-        })
-        .collect();
     for f in 0..cols {
         let t = f as f64 * FRAME_DT_MS;
         let ox = f * PUZZLE_W;
-        for &(dx, dy) in &decoys {
-            fill_circle(&mut img, ox as f64 + dx, dy, 2.0, [255, 94, 140, 255]);
-        }
-        for m in movers {
-            let (x, y) = pos_at(m, t);
-            fill_circle(&mut img, ox as f64 + x, y, TARGET_R, [22, 151, 249, 255]);
-            fill_circle(&mut img, ox as f64 + x, y, TARGET_R * 0.45, [237, 255, 253, 255]);
-        }
+        let (x, y) = pos_at_center(m, t);
+        fill_circle(&mut img, ox as f64 + x, y, TARGET_R, [22, 151, 249, 255]);
+        fill_circle(&mut img, ox as f64 + x, y, TARGET_R * 0.45, [237, 255, 253, 255]);
     }
     let mut buf = Vec::new();
     image::codecs::png::PngEncoder::new(Cursor::new(&mut buf))
@@ -288,7 +276,7 @@ fn grade_clicks(movers: &[Mover], clicks: &[Click]) -> Result<(), &'static str> 
             if used[i] {
                 continue;
             }
-            let (tx, ty) = pos_at(m, t_seen);
+            let (tx, ty) = pos_at_center(m, t_seen);
             let d = ((c.x - tx).powi(2) + (c.y - ty).powi(2)).sqrt();
             if d <= HIT_R {
                 matched = Some(i);
@@ -333,7 +321,18 @@ async fn issue(
     rand::thread_rng().fill_bytes(&mut seed);
     let seed_hex = hex::encode(seed);
     let movers = gen_movers_from(&s.challenge_key, &id);
-    let frames_b64 = render_frames(&movers);
+    let frames_b64: Vec<String> = movers.iter().map(render_panel).collect();
+    let motions: Vec<PanelMotion> = movers
+        .iter()
+        .map(|m| PanelMotion {
+            cx: m.x0,
+            cy: m.y0,
+            amp: m.amp,
+            turns: m.turns,
+            phase: m.vx,
+            dir: m.vy,
+        })
+        .collect();
     let created_ts = now_secs();
     {
         let mut store = s.store.lock().await;
@@ -357,6 +356,7 @@ async fn issue(
         modulus_hex: s.modulus_hex.clone(),
         difficulty,
         frames_b64,
+        motions,
         frame_count: FRAME_COUNT,
         frame_dt_ms: FRAME_DT_MS,
         puzzle_w: PUZZLE_W as f64,
@@ -456,7 +456,9 @@ async fn verify(
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.5).await;
         return err("invalid challenge signature");
-    }    let movers = gen_movers_from(&s.challenge_key, &sol.challenge_id);    if let Err(m) = validate_clicks(&sol.clicks) {
+    }
+    let movers = gen_movers_from(&s.challenge_key, &sol.challenge_id);
+    if let Err(m) = validate_clicks(&sol.clicks) {
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.3).await;
         return err(m);

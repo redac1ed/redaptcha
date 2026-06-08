@@ -7,11 +7,12 @@ const checkbox = document.getElementById("checkbox");
 const captchaEl = document.getElementById("captcha");
 const panel = document.getElementById("puzzle-panel");
 const timerBar = document.getElementById("timer-bar");
+const progressEl = document.getElementById("puzzle-progress");
 const W = canvas.width, H = canvas.height;
 const TIME_LIMIT = 15000;
-const puzzleImg = new Image();
 const EXPECTED_CLICKS = 3;
-let imgLoaded = false;
+const HIT_R = 22;
+const TARGET_R = 16;
 
 let state = "idle";
 let challenge = null;
@@ -19,14 +20,15 @@ let deadline = 0;
 let worker = null;
 let vdfProgress = 0;
 let clicks = [];
-let marks = [];
-let puzzleStart = 0;
 let trail = [];
-let framesImg = new Image();
-let framesLoaded = false;
+let puzzleStart = 0;
 let frameCount = 0;
 let frameDt = 50;
-let frameTiles = [];
+let panelStrips = [];
+let panelTiles = [];
+let panelMotions = [];
+let panelIdx = 0;
+let flashUntil = 0;
 
 function setUi() {
   captchaEl.classList.toggle("is-loading", state === "vdf");
@@ -36,28 +38,32 @@ function setUi() {
   checkbox.disabled = state !== "idle" && state !== "success" && state !== "failed";
 }
 
+function tTotal() {
+  return frameCount * frameDt;
+}
+
+function ballPosAtFrame(idx) {
+  const m = panelMotions[panelIdx];
+  if (!m) return { cx: W / 2, cy: H / 2 };
+  const t = idx * frameDt;
+  const w = m.dir * (m.turns * 2 * Math.PI * t) / tTotal();
+  const cx = m.cx + m.amp * Math.sin(m.phase + w) + m.amp * 0.4 * Math.sin(m.phase + 2.3 * w);
+  const cy = m.cy + m.amp * Math.sin(m.phase * 1.7 + 1.3 * w) + m.amp * 0.4 * Math.cos(m.phase + 1.9 * w);
+  return { cx, cy };
+}
+
 let lastDrawnIdx = -1;
-function draw(vdfProgress) {
-  if (state === "active" && framesLoaded && frameTiles.length > 0) {
+function draw(vp) {
+  if (state === "active" && panelTiles.length > 0) {
     const t = Date.now() - puzzleStart;
-    const idx = Math.floor(t / frameDt) % frameTiles.length;
-    if (idx !== lastDrawnIdx || marks.length > 0) {
-      ctx.drawImage(frameTiles[idx], 0, 0);
-      for (const m of marks) {
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, 20, 0, Math.PI * 2);
-        ctx.fillStyle = "#00103d";
-        ctx.fill();
-        ctx.strokeStyle = "#1697f9";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(m.x - 7, m.y - 7);
-        ctx.lineTo(m.x + 7, m.y + 7);
-        ctx.moveTo(m.x + 7, m.y - 7);
-        ctx.lineTo(m.x - 7, m.y + 7);
-        ctx.strokeStyle = "#edfffd";
-        ctx.stroke();
+    const idx = Math.floor(t / frameDt) % panelTiles.length;
+    const flashing = Date.now() < flashUntil;
+    if (idx !== lastDrawnIdx || flashing) {
+      ctx.drawImage(panelTiles[idx], 0, 0);
+      if (flashing) {
+        const a = (flashUntil - Date.now()) / 350;
+        ctx.fillStyle = `rgba(22,163,74,${0.5 * a})`;
+        ctx.fillRect(0, 0, W, H);
       }
       lastDrawnIdx = idx;
     }
@@ -69,7 +75,7 @@ function draw(vdfProgress) {
   if (state === "vdf") {
     ctx.fillStyle = "rgba(11,15,26,0.7)";
     ctx.fillRect(0, 0, W, H);
-    const barW = Math.round((vdfProgress ?? 0) * (W - 40));
+    const barW = Math.round((vp ?? 0) * (W - 40));
     ctx.fillStyle = "#1697f9";
     ctx.fillRect(20, H / 2 - 8, barW, 16);
     ctx.strokeStyle = "#edfffd";
@@ -88,6 +94,24 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+function buildTilesFor(idx) {
+  panelTiles = [];
+  const img = panelStrips[idx];
+  if (!img) return;
+  for (let i = 0; i < frameCount; i++) {
+    const tile = document.createElement("canvas");
+    tile.width = W;
+    tile.height = H;
+    tile.getContext("2d").drawImage(img, i * W, 0, W, H, 0, 0, W, H);
+    panelTiles.push(tile);
+  }
+  lastDrawnIdx = -1;
+}
+
+function setProgress() {
+  if (progressEl) progressEl.textContent = `${panelIdx} / ${EXPECTED_CLICKS} done`;
+}
+
 async function startChallenge() {
   statusEl.textContent = "Fetching challenge…";
   setUi();
@@ -102,7 +126,13 @@ async function startChallenge() {
       state = "idle"; setUi(); return;
     }
     challenge = await res.json();
-    if (!challenge || !challenge.modulus_hex || !challenge.seed_hex || !challenge.frames_b64) {
+    if (
+      !challenge ||
+      !challenge.modulus_hex ||
+      !challenge.seed_hex ||
+      !Array.isArray(challenge.frames_b64) ||
+      challenge.frames_b64.length === 0
+    ) {
       statusEl.textContent = "Bad challenge from server";
       state = "idle"; setUi(); return;
     }
@@ -111,38 +141,47 @@ async function startChallenge() {
     state = "idle"; setUi(); return;
   }
   frameCount = challenge.frame_count || 0;
-  frameDt = challenge.frame_dt_ms || 90;
-  framesLoaded = false;
-  const img = new Image();
-  await new Promise((resolve) => {
-    img.onload = () => resolve(true);
-    img.onerror = () => resolve(false);
-    img.src = `data:image/png;base64,${challenge.frames_b64}`;
-  });
-  framesImg = img;
-  framesLoaded = img.complete && img.naturalWidth > 0;
-  if (!framesLoaded) {
-    statusEl.textContent = "Could not load puzzle";
-    state = "idle"; setUi(); return;
+  frameDt = challenge.frame_dt_ms || 50;
+  panelMotions = Array.isArray(challenge.motions) ? challenge.motions : [];
+  panelStrips = [];
+  for (const b64 of challenge.frames_b64) {
+    const img = new Image();
+    const ok = await new Promise((resolve) => {
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+      img.src = `data:image/png;base64,${b64}`;
+    });
+    if (!ok || !(img.complete && img.naturalWidth > 0)) {
+      statusEl.textContent = "Could not load puzzle";
+      state = "idle"; setUi(); return;
+    }
+    panelStrips.push(img);
   }
-  frameTiles = [];
-  for (let i = 0; i < frameCount; i++) {
-    const tile = document.createElement("canvas");
-    tile.width = W;
-    tile.height = H;
-    tile.getContext("2d").drawImage(img, i * W, 0, W, H, 0, 0, W, H);
-    frameTiles.push(tile);
-  }
+
   state = "active";
   clicks = [];
-  marks = [];
   trail = [];
+  panelIdx = 0;
+  flashUntil = 0;
   puzzleStart = Date.now();
   deadline = Date.now() + TIME_LIMIT;
+  buildTilesFor(0);
+  setProgress();
   timerBar.style.opacity = "1";
   timerBar.style.transform = "scaleX(1)";
-  statusEl.textContent = `Click all ${EXPECTED_CLICKS} targets`;
+  statusEl.textContent = "Click the moving ball";
   setUi();
+}
+
+function advancePanel() {
+  panelIdx += 1;
+  setProgress();
+  if (panelIdx >= EXPECTED_CLICKS) {
+    puzzleSolved();
+    return;
+  }
+  buildTilesFor(panelIdx);
+  statusEl.textContent = "Click the moving ball";
 }
 
 function puzzleSolved() {
@@ -171,6 +210,7 @@ function puzzleSolved() {
     clicks,
   });
 }
+
 async function submitSolution(outputHex, proofHex) {
   statusEl.textContent = "Submitting…";
   try {
@@ -191,7 +231,7 @@ async function submitSolution(outputHex, proofHex) {
       state = "success";
       statusEl.textContent = "Success!";
       setUi();
-      unlockContent(result.token);   
+      unlockContent(result.token);
       return;
     } else {
       state = "failed";
@@ -235,18 +275,23 @@ function fail() {
   statusEl.textContent = "Expired — click to retry";
   setUi();
 }
+
 function reset() {
   if (worker) { worker.terminate(); worker = null; }
   state = "idle";
   clicks = [];
-  marks = [];
   trail = [];
-  frameTiles = [];
-  framesLoaded = false;
+  panelStrips = [];
+  panelTiles = [];
+  panelMotions = [];
+  panelIdx = 0;
+  flashUntil = 0;
+  if (progressEl) progressEl.textContent = "";
   timerBar.style.opacity = "0";
   statusEl.textContent = "Verify you are human";
   setUi();
 }
+
 checkbox.addEventListener("click", () => {
   if (state === "idle" || state === "failed") {
     startChallenge();
@@ -254,18 +299,27 @@ checkbox.addEventListener("click", () => {
     reset();
   }
 });
+
 canvas.addEventListener("click", (e) => {
   if (state !== "active") return;
+  if (Date.now() < flashUntil) return;
   const rect = canvas.getBoundingClientRect();
   const cx = (e.clientX - rect.left) * (W / rect.width);
   const cy = (e.clientY - rect.top) * (H / rect.height);
   const t = Date.now() - puzzleStart;
+  const seenIdx = Math.floor(t / frameDt) % frameCount;
+  const { cx: bx, cy: by } = ballPosAtFrame(seenIdx);
+  const hit = Math.hypot(cx - bx, cy - by) <= HIT_R;
+  if (!hit) {
+    statusEl.textContent = "Missed — click the ball";
+    return;
+  }
   clicks.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
-  marks.push({ x: cx, y: cy });
-  const left = EXPECTED_CLICKS - clicks.length;
-  statusEl.textContent = left > 0 ? `${left} left` : "";
-  if (clicks.length >= EXPECTED_CLICKS) puzzleSolved();
+  flashUntil = Date.now() + 350;
+  statusEl.textContent = "Nice!";
+  setTimeout(advancePanel, 360);
 });
+
 canvas.addEventListener("pointermove", (e) => {
   if (state !== "active") return;
   const rect = canvas.getBoundingClientRect();
