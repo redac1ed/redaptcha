@@ -14,6 +14,7 @@ RUN cargo build --release -p server
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=rust /build/target/release/server ./server
-COPY --from=frontend /build/frontend/dist ./frontend/dist
-CMD ["./server"]
+COPY --from=rust /build/target/release/server /app/server
+COPY --from=frontend /build/frontend/dist /app/frontend/dist
+ENV STATIC_DIR=/app/frontend/dist
+CMD ["/app/server"]
