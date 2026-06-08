@@ -29,5 +29,3 @@ num-integer = "0.1"
 time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"
 dotenvy = "0.15"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-async-trait = "0.1"
