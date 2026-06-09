@@ -6,7 +6,9 @@ pub struct Rendered {
 }
 
 pub trait Captcha {
+    #[allow(dead_code)]
     fn kind(&self) -> &'static str;
+    #[allow(dead_code)]
     fn expected_clicks(&self) -> usize;
     fn puzzle_w(&self) -> f64;
     fn puzzle_h(&self) -> f64;
