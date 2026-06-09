@@ -5,7 +5,7 @@ export default defineConfig({
     port: 5173,
     open: true,
     proxy: {
-      "/challenge": "http://localhost:3000",
+      "^/challenge(/.*)?$": "http://localhost:3000",
       "/verify": "http://localhost:3000",
       "/content": "http://localhost:3000",
     },

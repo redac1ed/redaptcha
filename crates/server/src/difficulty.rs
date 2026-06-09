@@ -15,6 +15,9 @@ pub const MIN_REACTION_MS: f64 = 120.0;
 pub const MAX_TELEPORT_FRAC: f64 = 0.6;
 pub const GLOBAL_RATE_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_GLOBAL_PER_WINDOW: u32 = 600;
+pub const TOUCH_MIN_TRAIL_POINTS: usize = 3;
+pub const TOUCH_MIN_TRAIL_PATH: f64 = 8.0;
+pub const TOUCH_MIN_SPAN_MS: f64 = 30.0;
 
 pub struct GlobalLimiter {
     pub count: u32,
@@ -182,28 +185,31 @@ pub fn trail_stats(trail: &[(f64, f64, f64)]) -> TrailStats {
     }
 }
 
-pub fn grade_trail(trail: &[(f64, f64, f64)]) -> Result<f64, &'static str> {
+pub fn grade_trail(trail: &[(f64, f64, f64)], is_touch: bool) -> Result<f64, &'static str> {
     let st = trail_stats(trail);
-    if st.points < MIN_TRAIL_POINTS {
+    let min_points = if is_touch { TOUCH_MIN_TRAIL_POINTS } else { MIN_TRAIL_POINTS };
+    let min_path = if is_touch { TOUCH_MIN_TRAIL_PATH } else { MIN_TRAIL_PATH };
+    let min_span = if is_touch { TOUCH_MIN_SPAN_MS } else { MIN_REACTION_MS };
+    if st.points < min_points {
         return Err("no human movement");
     }
-    if st.path_len < MIN_TRAIL_PATH {
+    if st.path_len < min_path {
         return Err("movement too small");
     }
-    if st.span < MIN_REACTION_MS {
+    if st.span < min_span {
         return Err("movement too brief");
     }
     if st.path_len > 0.0 && (st.max_step / st.path_len) > MAX_TELEPORT_FRAC {
         return Err("teleport detected");
     }
     let mut weight = 0.0;
-    if st.reaction_ms < 50.0 {
+    if !is_touch && st.reaction_ms < 50.0 {
         weight += 0.1;
     }
-    if st.points < MIN_TRAIL_POINTS * 2 {
+    if !is_touch && st.points < MIN_TRAIL_POINTS * 2 {
         weight += 0.1;
     }
-    Ok(weight) 
+    Ok(weight)
 }
 
 #[cfg(test)]
@@ -261,8 +267,7 @@ mod tests {
         assert!(classify_timing(90.0, 3).is_some());
         assert!(classify_timing(2000.0, 3).is_none());
         assert!(classify_timing(0.0, 0).is_none());
-    }
-    #[test]
+    }    #[test]
     fn trail_rejects_teleport() {
         let trail = vec![
             (0.0, 0.0, 0.0),
@@ -272,7 +277,7 @@ mod tests {
             (202.0, 202.0, 200.0),
             (203.0, 203.0, 250.0),
         ];
-        assert!(grade_trail(&trail).is_err());
+        assert!(grade_trail(&trail, false).is_err());
     }
     #[test]
     fn trail_accepts_human_drag() {
@@ -281,10 +286,20 @@ mod tests {
             let f = i as f64;
             trail.push((f * 5.0, f * 3.0, 150.0 + f * 40.0));
         }
-        assert!(grade_trail(&trail).is_ok());
+        assert!(grade_trail(&trail, false).is_ok());
     }
     #[test]
     fn trail_rejects_empty() {
-        assert!(grade_trail(&[]).is_err());
+        assert!(grade_trail(&[], false).is_err());
+    }
+    #[test]
+    fn trail_accepts_short_touch_drag() {
+        let trail = vec![
+            (10.0, 10.0, 0.0),
+            (12.0, 11.0, 20.0),
+            (15.0, 13.0, 45.0),
+        ];
+        assert!(grade_trail(&trail, false).is_err());
+        assert!(grade_trail(&trail, true).is_ok());
     }
 }

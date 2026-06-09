@@ -1,5 +1,6 @@
 const SERVER = import.meta.env.VITE_SERVER ?? "";
 const SITE_KEY = "rk_site_demo";
+const CAPTCHA_KIND = import.meta.env.VITE_CAPTCHA_KIND ?? "one";
 const canvas = document.getElementById("puzzle");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
@@ -29,6 +30,8 @@ let panelTiles = [];
 let panelMotions = [];
 let panelIdx = 0;
 let flashUntil = 0;
+let inputType = "mouse";
+let pointerDown = false;
 
 function setUi() {
   captchaEl.classList.toggle("is-loading", state === "vdf");
@@ -116,7 +119,7 @@ async function startChallenge() {
   statusEl.textContent = "Fetching challenge…";
   setUi();
   try {
-    const res = await fetch(`${SERVER}/challenge`, {
+    const res = await fetch(`${SERVER}/challenge/${CAPTCHA_KIND}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ site_key: SITE_KEY, hostname: location.hostname }),
@@ -224,6 +227,7 @@ async function submitSolution(outputHex, proofHex) {
         clicks,
         trail,
         sig: challenge.sig,
+        input_type: inputType,
       }),
     });
     const result = await res.json();
@@ -286,6 +290,8 @@ function reset() {
   panelMotions = [];
   panelIdx = 0;
   flashUntil = 0;
+  inputType = "mouse";
+  pointerDown = false;
   if (progressEl) progressEl.textContent = "";
   timerBar.style.opacity = "0";
   statusEl.textContent = "Verify you are human";
@@ -320,14 +326,30 @@ canvas.addEventListener("click", (e) => {
   setTimeout(advancePanel, 360);
 });
 
-canvas.addEventListener("pointermove", (e) => {
+canvas.addEventListener("pointerdown", (e) => {
   if (state !== "active") return;
+  inputType = e.pointerType || "mouse";
+  pointerDown = true;
   const rect = canvas.getBoundingClientRect();
   const cx = (e.clientX - rect.left) * (W / rect.width);
   const cy = (e.clientY - rect.top) * (H / rect.height);
   trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(Date.now() - puzzleStart) });
   if (trail.length > 400) trail.shift();
 });
+
+canvas.addEventListener("pointermove", (e) => {
+  if (state !== "active") return;
+  if (e.pointerType === "touch" && !pointerDown) return;
+  inputType = e.pointerType || inputType;
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (W / rect.width);
+  const cy = (e.clientY - rect.top) * (H / rect.height);
+  trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(Date.now() - puzzleStart) });
+  if (trail.length > 400) trail.shift();
+});
+
+canvas.addEventListener("pointerup", () => { pointerDown = false; });
+canvas.addEventListener("pointercancel", () => { pointerDown = false; });
 
 reset();
 loop();

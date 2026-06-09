@@ -228,3 +228,7 @@ canvas {
 .restricted.is-unlocked .lock-overlay {
  display: none; 
 }
+
+#puzzle {
+  touch-action: none;
+}
