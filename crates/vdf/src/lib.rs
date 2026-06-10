@@ -32,7 +32,6 @@ impl VdfParams {
         let h = BigUint::from_bytes_be(&hasher.finalize());
         (h % (&self.modulus - 2u32)) + 2u32
     }
-
     pub fn eval(&self, x: &BigUint, t: u64) -> VdfProof {
         let mut y = x.clone();
         for _ in 0..t {
@@ -43,8 +42,35 @@ impl VdfParams {
         let proof = x.modpow(&q, &self.modulus);
         VdfProof { output: y, proof }
     }
-
     pub fn verify(&self, x: &BigUint, t: u64, proof: &VdfProof) -> bool {
+        let zero = BigUint::from(0u32);
+        let one = BigUint::from(1u32);
+
+        if t == 0 {
+            return false;
+        }
+        if self.modulus <= one {
+            return false;
+        }
+        if x == &zero || x >= &self.modulus {
+            return false;
+        }
+        if proof.output == zero || proof.output == one || proof.output >= self.modulus {
+            return false;
+        }
+        if proof.proof == zero || proof.proof >= self.modulus {
+            return false;
+        }
+        if proof.output == *x {
+            return false;
+        }
+        if proof.output.gcd(&self.modulus) != one {
+            return false;
+        }
+        if proof.proof.gcd(&self.modulus) != one {
+            return false;
+        }
+
         let l = hash_to_prime(x, &proof.output);
         let r = BigUint::from(2u32).modpow(&BigUint::from(t), &l);
         let lhs = (proof.proof.modpow(&l, &self.modulus)

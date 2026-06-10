@@ -11,6 +11,7 @@ pub struct TokenClaims {
     pub challenge_id: String,
     pub site_key: String,
     pub hostname: String,
+    pub ip: String,
     pub issued_at: u64,
     pub expires_at: u64,
 }
@@ -36,8 +37,13 @@ fn b64url_decode(text: &str) -> Option<Vec<u8>> {
 
 pub fn sign(key: &[u8], claims: &TokenClaims) -> String {
     let payload = format!(
-        "{}|{}|{}|{}|{}",
-        claims.challenge_id, claims.site_key, claims.hostname, claims.issued_at, claims.expires_at
+        "{}|{}|{}|{}|{}|{}",
+        claims.challenge_id,
+        claims.site_key,
+        claims.hostname,
+        claims.ip,
+        claims.issued_at,
+        claims.expires_at
     );
     let encoded = b64url(payload.as_bytes());
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
@@ -61,11 +67,11 @@ pub fn verify(key: &[u8], token: &str) -> Option<TokenClaims> {
     let raw = b64url_decode(encoded)?;
     let payload = String::from_utf8(raw).ok()?;
     let parts: Vec<&str> = payload.split('|').collect();
-    if parts.len() != 5 {
+    if parts.len() != 6 {
         return None;
     }
-    let issued_at: u64 = parts[3].parse().ok()?;
-    let expires_at: u64 = parts[4].parse().ok()?;
+    let issued_at: u64 = parts[4].parse().ok()?;
+    let expires_at: u64 = parts[5].parse().ok()?;
     if now_secs() > expires_at {
         return None;
     }
@@ -73,6 +79,7 @@ pub fn verify(key: &[u8], token: &str) -> Option<TokenClaims> {
         challenge_id: parts[0].to_string(),
         site_key: parts[1].to_string(),
         hostname: parts[2].to_string(),
+        ip: parts[3].to_string(),
         issued_at,
         expires_at,
     })
@@ -123,6 +130,7 @@ mod tests {
             challenge_id: "cid-123".into(),
             site_key: "site_abc".into(),
             hostname: "example.com".into(),
+            ip: "203.0.113.7".into(),
             issued_at: iat,
             expires_at: iat + TOKEN_TTL_SECS,
         }
@@ -134,6 +142,7 @@ mod tests {
         let parsed = verify(&key, &t).expect("valid token");
         assert_eq!(parsed.site_key, "site_abc");
         assert_eq!(parsed.hostname, "example.com");
+        assert_eq!(parsed.ip, "203.0.113.7");
     }
     #[test]
     fn wrong_key_rejected() {
@@ -157,6 +166,7 @@ mod tests {
             challenge_id: "x".into(),
             site_key: "s".into(),
             hostname: "h".into(),
+            ip: "198.51.100.1".into(),
             issued_at: iat,
             expires_at: iat + 10,
         };

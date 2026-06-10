@@ -7,7 +7,7 @@ mod store;
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
-    http::{header::CONTENT_TYPE, HeaderValue, Method},
+    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, Method},
     routing::post,
     Json, Router,
 };
@@ -21,7 +21,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use core_types::{Challenge, ChallengeRequest, Solution, VerifyResponse};
 use difficulty::{difficulty_for, ClientProfile, GlobalLimiter, FRAME_COUNT, FRAME_DT_MS};
 use num_bigint::BigUint;
-use rand::{RngCore};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use token::{now_secs, TokenClaims, TOKEN_TTL_SECS};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -31,6 +32,8 @@ use vdf::{VdfParams, VdfProof};
 
 const MODULUS_BITS: u64 = 2048;
 const TTL: Duration = Duration::from_secs(120);
+const MAX_PROFILES: usize = 50_000;
+const PROFILE_TTL: Duration = Duration::from_secs(3600);
 
 struct Stored {
     kind: String,
@@ -63,6 +66,53 @@ struct ContentResp {
     content: Option<String>,
 }
 
+fn is_production() -> bool {
+    matches!(
+        std::env::var("REDAPTCHA_ENV").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "production" | "prod"
+    )
+}
+
+fn fingerprint(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"redaptcha-fp");
+    h.update(bytes);
+    let d = h.finalize();
+    hex::encode(&d[..6])
+}
+
+fn client_ip(addr: &SocketAddr, headers: &HeaderMap) -> String {
+    if is_production() {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(last) = xff.split(',').map(str::trim).filter(|s| !s.is_empty()).last() {
+                if last.parse::<std::net::IpAddr>().is_ok() {
+                    return last.to_string();
+                }
+            }
+        }
+    }
+    addr.ip().to_string()
+}
+
+fn enforce_profile_cap(profiles: &mut HashMap<String, ClientProfile>, ip: &str, now: Instant) {
+    if profiles.len() < MAX_PROFILES || profiles.contains_key(ip) {
+        return;
+    }
+    profiles.retain(|_, p| now.duration_since(p.last_seen) <= PROFILE_TTL);
+    if profiles.len() < MAX_PROFILES {
+        return;
+    }
+    let mut entries: Vec<(String, Instant)> = profiles
+        .iter()
+        .map(|(k, p)| (k.clone(), p.last_seen))
+        .collect();
+    entries.sort_by_key(|&(_, t)| t);
+    let excess = profiles.len() + 1 - MAX_PROFILES;
+    for (k, _) in entries.into_iter().take(excess) {
+        profiles.remove(&k);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::from_filename(".env.local");
@@ -74,6 +124,9 @@ async fn main() {
             h.trim().to_string()
         }
         _ => {
+            if is_production() {
+                panic!("REDAPTCHA_MODULUS_HEX not set in production; refusing to generate an ephemeral modulus (would break in-flight challenges on restart)");
+            }
             println!("generating {}-bit trusted-setup modulus...", MODULUS_BITS);
             let gen_start = Instant::now();
             let setup = setup::generate(MODULUS_BITS);
@@ -82,7 +135,7 @@ async fn main() {
                 setup.bits,
                 gen_start.elapsed()
             );
-            println!("REDAPTCHA_MODULUS_HEX={}  <- set this in your deploy config to persist across restarts", setup.modulus_hex);
+            println!("set REDAPTCHA_MODULUS_HEX in your deploy config to persist this modulus across restarts (value written to .env.local-style config only, not logged here)");
             setup.modulus_hex
         }
     };
@@ -96,6 +149,16 @@ async fn main() {
         challenge_key: chal_key,
         redeem,
         global: Mutex::new(GlobalLimiter::new(Instant::now())),
+    });
+    let st = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let now = Instant::now();
+            let mut profiles = st.profiles.lock().await;
+            profiles.retain(|_, p| now.duration_since(p.last_seen) <= PROFILE_TTL);
+        }
     });
     let cors = CorsLayer::new()
         .allow_origin([
@@ -148,32 +211,43 @@ fn load_or_gen_key(var: &str) -> Vec<u8> {
     if let Ok(b64) = std::env::var(var) {
         if let Ok(bytes) = B64.decode(b64.trim()) {
             if bytes.len() == 32 {
+                println!("{var}: loaded (fingerprint {})", fingerprint(&bytes));
                 return bytes;
             }
         }
+        if is_production() {
+            panic!("{var} set but invalid (need base64 of 32 bytes)");
+        }
         eprintln!("warning: {var} set but invalid (need base64 of 32 bytes); generating ephemeral key");
+    } else if is_production() {
+        panic!("{var} not set in production; refusing to generate an ephemeral secret");
     }
     let mut k = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut k);
-    println!("{var}={}  <- set this in your deploy config to persist across restarts", B64.encode(&k));
+    println!(
+        "{var}: generated ephemeral key (fingerprint {}). Set {var} in your deploy config to persist across restarts; the raw value is intentionally NOT logged.",
+        fingerprint(&k)
+    );
     k
 }
 
 async fn issue_default(
     info: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     state: State<Arc<AppState>>,
     req: Json<ChallengeRequest>,
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
-    issue(info, Path(captchas::DEFAULT_KIND.to_string()), state, req).await
+    issue(info, Path(captchas::DEFAULT_KIND.to_string()), headers, state, req).await
 }
 
 async fn issue(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(kind): Path<String>,
+    headers: HeaderMap,
     State(s): State<Arc<AppState>>,
     Json(_req): Json<ChallengeRequest>,
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
-    let ip = addr.ip().to_string();
+    let ip = client_ip(&addr, &headers);
     let now = Instant::now();
     let puzzle = match captchas::by_kind(&kind) {
         Some(p) => p,
@@ -184,6 +258,7 @@ async fn issue(
     }
     let difficulty = {
         let mut profiles = s.profiles.lock().await;
+        enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
             .entry(ip.clone())
             .or_insert_with(|| ClientProfile::new(now));
@@ -236,15 +311,17 @@ async fn issue(
 
 async fn content(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(s): State<Arc<AppState>>,
     Json(req): Json<ContentReq>,
 ) -> Json<ContentResp> {
-    let ip = addr.ip().to_string();
+    let ip = client_ip(&addr, &headers);
     {
         let now = Instant::now();
         let mut profiles = s.profiles.lock().await;
+        enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
-            .entry(ip)
+            .entry(ip.clone())
             .or_insert_with(|| ClientProfile::new(now));
         profile.roll_window(now);
         if !profile.register_verify(now) {
@@ -257,7 +334,9 @@ async fn content(
     let Some(claims) = token::verify(&s.token_key, &req.token) else {
         return Json(ContentResp { ok: false, content: None });
     };
-    let _ = claims;
+    if claims.ip != ip {
+        return Json(ContentResp { ok: false, content: None });
+    }
     {
         if !s.redeem.try_consume(&req.token).await {
             return Json(ContentResp { ok: false, content: None });
@@ -271,10 +350,11 @@ async fn content(
 
 async fn verify(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(s): State<Arc<AppState>>,
     Json(sol): Json<Solution>,
 ) -> Json<VerifyResponse> {
-    let ip = addr.ip().to_string();
+    let ip = client_ip(&addr, &headers);
     if sol.output_hex.len() > 4096 || sol.proof_hex.len() > 4096 {
         return err("input too large");
     }
@@ -284,6 +364,7 @@ async fn verify(
     {
         let now = Instant::now();
         let mut profiles = s.profiles.lock().await;
+        enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
             .entry(ip.clone())
             .or_insert_with(|| ClientProfile::new(now));
@@ -302,9 +383,16 @@ async fn verify(
             store.remove(&sol.challenge_id);
             return err("challenge expired");
         }
+        let seed = match hex::decode(&stored.seed_hex) {
+            Ok(s) => s,
+            Err(_) => {
+                store.remove(&sol.challenge_id);
+                return err("corrupt challenge");
+            }
+        };
         (
             stored.kind.clone(),
-            hex::decode(&stored.seed_hex).unwrap(),
+            seed,
             stored.difficulty,
             stored.created_ts,
             stored.issuer_ip.clone(),
@@ -392,6 +480,7 @@ async fn verify(
             challenge_id: sol.challenge_id.clone(),
             site_key: String::new(),
             hostname: String::new(),
+            ip: ip.clone(),
             issued_at: created_ts.max(iat.saturating_sub(TTL.as_secs())),
             expires_at: iat + TOKEN_TTL_SECS,
         };

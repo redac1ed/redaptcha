@@ -296,8 +296,8 @@ mod tests {
     fn trail_accepts_short_touch_drag() {
         let trail = vec![
             (10.0, 10.0, 0.0),
-            (12.0, 11.0, 20.0),
-            (15.0, 13.0, 45.0),
+            (14.0, 13.0, 20.0),
+            (19.0, 17.0, 45.0),
         ];
         assert!(grade_trail(&trail, false).is_err());
         assert!(grade_trail(&trail, true).is_ok());
