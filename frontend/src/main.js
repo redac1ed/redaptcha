@@ -14,6 +14,7 @@ const TIME_LIMIT = 15000;
 const EXPECTED_CLICKS = 3;
 const HIT_R = 22;
 const TARGET_R = 16;
+const SLIDER_ROUNDS = 3
 
 let state = "idle";
 let challenge = null;
@@ -32,6 +33,17 @@ let panelIdx = 0;
 let flashUntil = 0;
 let inputType = "mouse";
 let pointerDown = false;
+let sliderHint = null;
+let pieceX = 0;
+let pieceY = 0;
+let dragging = false; 
+let dragStartT = 0;
+let isSlider = false;
+let pieceImg = null;
+let dragDX = 0;
+let dragDY = 0;
+let lastDrawnIdx = -1;
+let sliderRound = 0;
 
 function setUi() {
   captchaEl.classList.toggle("is-loading", state === "vdf");
@@ -55,20 +67,15 @@ function ballPosAtFrame(idx) {
   return { cx, cy };
 }
 
-let lastDrawnIdx = -1;
 function draw(vp) {
-  if (state === "active" && panelTiles.length > 0) {
-    const t = Date.now() - puzzleStart;
-    const idx = Math.floor(t / frameDt) % panelTiles.length;
-    const flashing = Date.now() < flashUntil;
-    if (idx !== lastDrawnIdx || flashing) {
-      ctx.drawImage(panelTiles[idx], 0, 0);
-      if (flashing) {
-        const a = (flashUntil - Date.now()) / 350;
-        ctx.fillStyle = `rgba(22,163,74,${0.5 * a})`;
-        ctx.fillRect(0, 0, W, H);
-      }
-      lastDrawnIdx = idx;
+  if (state === "active" && isSlider) {
+    const bg = panelStrips[0];
+    if (bg) ctx.drawImage(bg, 0, 0, W, H);
+    if (pieceImg && sliderHint) {
+      const flashing = Date.now() < flashUntil;
+      ctx.globalAlpha = flashing ? 1 : 0.95;
+      ctx.drawImage(pieceImg, pieceX, pieceY, sliderHint.piece_w, sliderHint.piece_h);
+      ctx.globalAlpha = 1;
     }
     return;
   }
@@ -112,7 +119,12 @@ function buildTilesFor(idx) {
 }
 
 function setProgress() {
-  if (progressEl) progressEl.textContent = `${panelIdx} / ${EXPECTED_CLICKS} done`;
+  if (!progressEl) return;
+  if (isSlider) {
+    progressEl.textContent = `Round ${sliderRound + 1} / ${SLIDER_ROUNDS}`;
+  } else {
+    progressEl.textContent = `${panelIdx} / ${EXPECTED_CLICKS} done`;
+  }
 }
 
 async function startChallenge() {
@@ -146,6 +158,8 @@ async function startChallenge() {
   frameCount = challenge.frame_count || 0;
   frameDt = challenge.frame_dt_ms || 50;
   panelMotions = Array.isArray(challenge.motions) ? challenge.motions : [];
+  isSlider = challenge.kind === "two";
+  sliderHint = challenge.slider || null;
   panelStrips = [];
   for (const b64 of challenge.frames_b64) {
     const img = new Image();
@@ -160,19 +174,26 @@ async function startChallenge() {
     }
     panelStrips.push(img);
   }
-
   state = "active";
   clicks = [];
   trail = [];
   panelIdx = 0;
   flashUntil = 0;
   puzzleStart = Date.now();
+  if (isSlider && sliderHint) {
+    pieceImg = panelStrips[1] || null;
+    pieceX = sliderHint.start_x;
+    pieceY = sliderHint.start_y;
+    dragging = false;
+    statusEl.textContent = "Drag the piece into the gap";
+  } else {
+    statusEl.textContent = "Click the moving ball";
+  }
   deadline = Date.now() + TIME_LIMIT;
   buildTilesFor(0);
   setProgress();
   timerBar.style.opacity = "1";
   timerBar.style.transform = "scaleX(1)";
-  statusEl.textContent = "Click the moving ball";
   setUi();
 }
 
@@ -232,6 +253,13 @@ async function submitSolution(outputHex, proofHex) {
     });
     const result = await res.json();
     if (result.ok && result.token) {
+      if (isSlider && sliderRound < SLIDER_ROUNDS - 1) {
+        sliderRound += 1;
+        if (worker) { worker.terminate(); worker = null; }
+        statusEl.textContent = `Round ${sliderRound + 1} of ${SLIDER_ROUNDS}…`;
+        await startChallenge();
+        return;
+      }
       state = "success";
       statusEl.textContent = "Success!";
       setUi();
@@ -292,6 +320,15 @@ function reset() {
   flashUntil = 0;
   inputType = "mouse";
   pointerDown = false;
+  sliderHint = null;
+  pieceX = 0;
+  pieceY = 0;
+  dragging = false;
+  isSlider = false;
+  dragDX = 0;
+  dragDY = 0;
+  pieceImg = null;
+  sliderRound = 0
   if (progressEl) progressEl.textContent = "";
   timerBar.style.opacity = "0";
   statusEl.textContent = "Verify you are human";
@@ -300,6 +337,7 @@ function reset() {
 
 checkbox.addEventListener("click", () => {
   if (state === "idle" || state === "failed") {
+    sliderRound = 0;
     startChallenge();
   } else if (state === "success") {
     reset();
@@ -308,6 +346,7 @@ checkbox.addEventListener("click", () => {
 
 canvas.addEventListener("click", (e) => {
   if (state !== "active") return;
+  if (isSlider) return;
   if (Date.now() < flashUntil) return;
   const rect = canvas.getBoundingClientRect();
   const cx = (e.clientX - rect.left) * (W / rect.width);
@@ -328,6 +367,7 @@ canvas.addEventListener("click", (e) => {
 
 canvas.addEventListener("pointerdown", (e) => {
   if (state !== "active") return;
+  if (isSlider) return;
   inputType = e.pointerType || "mouse";
   pointerDown = true;
   const rect = canvas.getBoundingClientRect();
@@ -339,6 +379,7 @@ canvas.addEventListener("pointerdown", (e) => {
 
 canvas.addEventListener("pointermove", (e) => {
   if (state !== "active") return;
+  if (isSlider) return;
   if (e.pointerType === "touch" && !pointerDown) return;
   inputType = e.pointerType || inputType;
   const rect = canvas.getBoundingClientRect();
@@ -350,6 +391,46 @@ canvas.addEventListener("pointermove", (e) => {
 
 canvas.addEventListener("pointerup", () => { pointerDown = false; });
 canvas.addEventListener("pointercancel", () => { pointerDown = false; });
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (state !== "active" || !isSlider || !sliderHint) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (W / rect.width);
+  const y = (e.clientY - rect.top) * (H / rect.height);
+  if (
+    x >= pieceX && x <= pieceX + sliderHint.piece_w &&
+    y >= pieceY && y <= pieceY + sliderHint.piece_h
+  ) {
+    dragging = true;
+    inputType = e.pointerType || "mouse";
+    dragDX = x - pieceX;
+    dragDY = y - pieceY;
+    dragStartT = Date.now() - puzzleStart;
+    clicks = [{ x: Math.round(pieceX), y: Math.round(pieceY), t: Math.round(dragStartT) }];
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (state !== "active" || !isSlider || !dragging || !sliderHint) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (W / rect.width);
+  const y = (e.clientY - rect.top) * (H / rect.height);
+  pieceX = Math.max(0, Math.min(W - sliderHint.piece_w, x - dragDX));
+  pieceY = Math.max(0, Math.min(H - sliderHint.piece_h, y - dragDY));
+  trail.push({ x: Math.round(x), y: Math.round(y), t: Math.round(Date.now() - puzzleStart) });
+  if (trail.length > 400) trail.shift();
+});
+
+canvas.addEventListener("pointerup", () => {
+  if (state !== "active" || !isSlider || !dragging || !sliderHint) return;
+  dragging = false;
+  const t = Date.now() - puzzleStart;
+  clicks.push({ x: Math.round(pieceX), y: Math.round(pieceY), t: Math.round(t) });
+  flashUntil = Date.now() + 350;
+  statusEl.textContent = "Checking…";
+  setTimeout(puzzleSolved, 360);
+});
 
 reset();
 loop();

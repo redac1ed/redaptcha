@@ -275,6 +275,7 @@ async fn issue(
     let rendered = puzzle.generate(&s.challenge_key, &id);
     let frames_b64 = rendered.frames_b64;
     let motions = rendered.motions;
+    let slider = rendered.slider;
     let created_ts = now_secs();
     {
         let mut store = s.store.lock().await;
@@ -306,6 +307,7 @@ async fn issue(
         puzzle_w: puzzle.puzzle_w(),
         puzzle_h: puzzle.puzzle_h(),
         sig,
+        slider,
     }))
 }
 

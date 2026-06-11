@@ -9,6 +9,8 @@ pub struct Challenge {
     pub difficulty: u64,
     pub frames_b64: Vec<String>,
     pub motions: Vec<PanelMotion>,
+    #[serde(default)]
+    pub slider: Option<SliderHint>,
     pub frame_count: u32,
     pub frame_dt_ms: f64,
     pub puzzle_w: f64,
@@ -24,6 +26,14 @@ pub struct PanelMotion {
     pub turns: f64,
     pub phase: f64,
     pub dir: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SliderHint {
+    pub piece_w: f64,
+    pub piece_h: f64,
+    pub start_x: f64,
+    pub start_y: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

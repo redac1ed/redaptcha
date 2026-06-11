@@ -1,8 +1,9 @@
-use core_types::{Click, PanelMotion};
+use core_types::{Click, PanelMotion, SliderHint};
 
 pub struct Rendered {
     pub frames_b64: Vec<String>,
     pub motions: Vec<PanelMotion>,
+    pub slider: Option<SliderHint>,
 }
 
 pub trait Captcha {

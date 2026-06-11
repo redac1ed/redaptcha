@@ -33,7 +33,7 @@ impl Captcha for MovingBall {
         let motions = movers.iter().map(|m| PanelMotion {
             cx: m.x0, cy: m.y0, amp: m.amp, turns: m.turns, phase: m.vx, dir: m.vy,
         }).collect();
-        Rendered { frames_b64, motions }
+        Rendered { frames_b64, motions, slider: None }
     }
     fn validate(&self, clicks: &[Click]) -> Result<(), &'static str> {
         validate_clicks(clicks)
