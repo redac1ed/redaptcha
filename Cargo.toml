@@ -11,4 +11,5 @@ crypto-bigint = "0.5"
 sha2 = "0.10"
 num-bigint = "0.4"
 num-integer = "0.1"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }

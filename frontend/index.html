@@ -9,34 +9,68 @@
   <body>
     <main class="page">
       <h1 class="page-title">redaptcha</h1>
-      <p class="page-sub">test page</p>
-      <div class="captcha" id="captcha">
-        <button class="cb-box" id="checkbox" aria-label="Verify you are human">
-          <span class="cb-mark" id="cb-mark"></span>
-          <span class="cb-spinner" id="cb-spinner"></span>
-        </button>
-        <div class="cb-label">
-          <span id="status">Verify you are human</span>
+      <p class="page-sub">use the arrows to switch captchas</p>
+      <div class="carousel" id="carousel">
+        <button class="carousel-btn carousel-prev" id="carousel-prev" aria-label="Previous captcha">‹</button>
+        <div class="carousel-viewport">
+          <div class="captcha-scroller" id="captcha-scroller">
+            <div class="captcha-card" data-kind="one">
+              <h3 class="card-title">Moving Ball</h3>
+              <div class="captcha" data-role="captcha">
+                <button class="cb-box" data-role="checkbox" aria-label="Verify you are human">
+                  <span class="cb-mark"></span>
+                  <span class="cb-spinner"></span>
+                </button>
+                <div class="cb-label">
+                  <span data-role="status">Verify you are human</span>
+                </div>
+                <div class="cb-brand">
+                  <span class="brand-name">redaptcha</span>
+                  <span class="brand-sub">Privacy · Terms</span>
+                </div>
+              </div>
+              <div class="puzzle-panel" data-role="panel">
+                <div class="puzzle">
+                  <span data-role="progress" class="puzzle-progress"></span>
+                  <canvas data-role="canvas" width="320" height="240"></canvas>
+                  <div class="timer-wrap"><div data-role="timer" class="timer-bar"></div></div>
+                </div>
+              </div>
+            </div>
+            <div class="captcha-card" data-kind="two">
+              <h3 class="card-title">Slider</h3>
+              <div class="captcha" data-role="captcha">
+                <button class="cb-box" data-role="checkbox" aria-label="Verify you are human">
+                  <span class="cb-mark"></span>
+                  <span class="cb-spinner"></span>
+                </button>
+                <div class="cb-label">
+                  <span data-role="status">Verify you are human</span>
+                </div>
+                <div class="cb-brand">
+                  <span class="brand-name">redaptcha</span>
+                  <span class="brand-sub">Privacy · Terms</span>
+                </div>
+              </div>
+              <div class="puzzle-panel" data-role="panel">
+                <div class="puzzle">
+                  <span data-role="progress" class="puzzle-progress"></span>
+                  <canvas data-role="canvas" width="320" height="240"></canvas>
+                  <div class="timer-wrap"><div data-role="timer" class="timer-bar"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="cb-brand">
-          <span class="brand-name">redaptcha</span>
-          <span class="brand-sub">Privacy · Terms</span>
-        </div>
-      </div>
-      <div class="puzzle-panel" id="puzzle-panel">
-        <div class="puzzle">
-          <span id="puzzle-progress" class="puzzle-progress"></span>
-          <canvas id="puzzle" width="320" height="240"></canvas>
-          <div class="timer-wrap"><div id="timer-bar" class="timer-bar"></div></div>
-        </div>
+        <button class="carousel-btn carousel-next" id="carousel-next" aria-label="Next captcha">›</button>
       </div>
       <section class="restricted" id="restricted">
         <div class="lock-overlay">
-          <span class="lock-hint">🔒 Solve the CAPTCHA to unlock</span>
+          <span class="lock-hint">🔒 Solve any CAPTCHA to unlock</span>
         </div>
         <div class="restricted-content">
           <h2>Members-only area</h2>
-          <p id="restricted-body">…</p>
+          <p id="restricted-body">ouuuuuuuu shiiiiiiiiiiii</p>
         </div>
       </section>
     </main>

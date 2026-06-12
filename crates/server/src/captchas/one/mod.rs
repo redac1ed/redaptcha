@@ -2,6 +2,8 @@ use std::io::Cursor;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use core_types::{Click, Mover, PanelMotion};
 use image::{ImageEncoder, RgbaImage};
+use rayon::prelude::*;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
 use crate::captcha::{Captcha, Rendered};
 use crate::difficulty::{FRAME_COUNT, FRAME_DT_MS};
@@ -29,7 +31,7 @@ impl Captcha for MovingBall {
     fn puzzle_h(&self) -> f64 { PUZZLE_H as f64 }
     fn generate(&self, challenge_key: &[u8], challenge_id: &str) -> Rendered {
         let movers = gen_movers_from(challenge_key, challenge_id);
-        let frames_b64 = movers.iter().map(render_panel).collect();
+        let frames_b64 = movers.par_iter().map(render_panel).collect();
         let motions = movers.iter().map(|m| PanelMotion {
             cx: m.x0, cy: m.y0, amp: m.amp, turns: m.turns, phase: m.vx, dir: m.vy,
         }).collect();
@@ -70,18 +72,25 @@ fn gen_movers_from(key: &[u8], challenge_id: &str) -> Vec<Mover> {
 
 fn fill_circle(img: &mut RgbaImage, cx: f64, cy: f64, r: f64, color: [u8; 4]) {
     let r2 = r * r;
-    let w = img.width() as f64;
-    let h = img.height() as f64;
+    let iw = img.width();
+    let ih = img.height();
     let x0 = (cx - r).floor().max(0.0) as u32;
-    let x1 = (cx + r).ceil().min(w) as u32;
+    let x1 = ((cx + r).ceil() as i64).clamp(0, iw as i64) as u32;
     let y0 = (cy - r).floor().max(0.0) as u32;
-    let y1 = (cy + r).ceil().min(h) as u32;
+    let y1 = ((cy + r).ceil() as i64).clamp(0, ih as i64) as u32;
+    let buf = img.as_mut(); // &mut [u8], RGBA8 row-major
     for y in y0..y1 {
+        let row = (y as usize) * (iw as usize) * 4;
+        let dy = y as f64 + 0.5 - cy;
+        let dy2 = dy * dy;
         for x in x0..x1 {
             let dx = x as f64 + 0.5 - cx;
-            let dy = y as f64 + 0.5 - cy;
-            if dx * dx + dy * dy <= r2 {
-                img.put_pixel(x, y, image::Rgba(color));
+            if dx * dx + dy2 <= r2 {
+                let i = row + (x as usize) * 4;
+                buf[i] = color[0];
+                buf[i + 1] = color[1];
+                buf[i + 2] = color[2];
+                buf[i + 3] = color[3];
             }
         }
     }
@@ -107,7 +116,7 @@ fn render_panel(m: &Mover) -> String {
         fill_circle(&mut img, ox as f64 + x, y, TARGET_R * 0.45, [237, 255, 253, 255]);
     }
     let mut buf = Vec::new();
-    image::codecs::png::PngEncoder::new(Cursor::new(&mut buf))
+    PngEncoder::new_with_quality(Cursor::new(&mut buf), CompressionType::Fast, FilterType::Up)
         .write_image(img.as_raw(), strip_w, PUZZLE_H, image::ExtendedColorType::Rgba8)
         .unwrap();
     B64.encode(&buf)

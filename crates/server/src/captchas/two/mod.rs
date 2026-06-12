@@ -251,7 +251,11 @@ fn is_edge(mask: &[Vec<bool>], x: usize, y: usize) -> bool {
 
 fn encode(img: &RgbaImage) -> String {
     let mut buf = Vec::new();
-    image::codecs::png::PngEncoder::new(Cursor::new(&mut buf))
+    image::codecs::png::PngEncoder::new_with_quality(
+        Cursor::new(&mut buf),
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Up,
+    )
         .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
         .unwrap();
     B64.encode(&buf)

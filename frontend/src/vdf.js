@@ -74,13 +74,7 @@ async function hashToPrime(xBytes, yBytes) {
 }
 
 function floorTwoPowTDiv(t, l) {
-  let q = 0n, r = 0n;
-  for (let i = 0n; i <= BigInt(t); i++) {
-    r = (r << 1n) + (i === 0n ? 1n : 0n);
-    q <<= 1n;
-    if (r >= l) { r -= l; q += 1n; }
-  }
-  return q;
+  return (1n << BigInt(t)) / l;
 }
 
 export function trajectoryBytes(clicks) {
@@ -96,12 +90,11 @@ export async function evalVdf(seedHex, modulusHex, t, clicks, onProgress) {
   );
   const x = (BigInt("0x" + bytesToHex(xHash)) % (N - 2n)) + 2n;
   let y = x;
-  const BATCH = 1000;
+  const BATCH = 5000;
   for (let i = 0; i < t; i += BATCH) {
     const end = Math.min(i + BATCH, t);
     for (let j = i; j < end; j++) y = (y * y) % N;
     if (onProgress) onProgress(end / t);
-    await new Promise((res) => setTimeout(res, 0));
   }
   const xBytes = bigIntToBytesBE(x);
   const yBytes = bigIntToBytesBE(y);

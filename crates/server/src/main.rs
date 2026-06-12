@@ -24,11 +24,12 @@ use num_bigint::BigUint;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use token::{now_secs, TokenClaims, TOKEN_TTL_SECS};
-use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 use vdf::{VdfParams, VdfProof};
+use std::fmt::Write as _;
+use parking_lot::Mutex;
 
 const MODULUS_BITS: u64 = 2048;
 const TTL: Duration = Duration::from_secs(120);
@@ -156,8 +157,14 @@ async fn main() {
         loop {
             tick.tick().await;
             let now = Instant::now();
-            let mut profiles = st.profiles.lock().await;
-            profiles.retain(|_, p| now.duration_since(p.last_seen) <= PROFILE_TTL);
+            {
+                let mut profiles = st.profiles.lock();
+                profiles.retain(|_, p| now.duration_since(p.last_seen) <= PROFILE_TTL);
+            }
+            {
+                let mut store = st.store.lock();
+                store.retain(|_, v| v.born.elapsed() <= TTL);
+            }
         }
     });
     let cors = CorsLayer::new()
@@ -253,11 +260,11 @@ async fn issue(
         Some(p) => p,
         None => return Err(err("unknown captcha kind")),
     };
-    if !s.global.lock().await.allow(now) {
+    if !s.global.lock().allow(now) {
         return Err(err("server busy"));
     }
     let difficulty = {
-        let mut profiles = s.profiles.lock().await;
+        let mut profiles = s.profiles.lock();
         enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
             .entry(ip.clone())
@@ -278,8 +285,7 @@ async fn issue(
     let slider = rendered.slider;
     let created_ts = now_secs();
     {
-        let mut store = s.store.lock().await;
-        store.retain(|_, v| v.born.elapsed() <= TTL);
+        let mut store = s.store.lock();
         store.insert(
             id.clone(),
             Stored {
@@ -320,7 +326,7 @@ async fn content(
     let ip = client_ip(&addr, &headers);
     {
         let now = Instant::now();
-        let mut profiles = s.profiles.lock().await;
+        let mut profiles = s.profiles.lock();
         enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
             .entry(ip.clone())
@@ -360,12 +366,12 @@ async fn verify(
     if sol.output_hex.len() > 4096 || sol.proof_hex.len() > 4096 {
         return err("input too large");
     }
-    if !s.global.lock().await.allow(Instant::now()) {
+    if !s.global.lock().allow(Instant::now()) {
         return err("server busy");
     }
     {
         let now = Instant::now();
-        let mut profiles = s.profiles.lock().await;
+        let mut profiles = s.profiles.lock();
         enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
             .entry(ip.clone())
@@ -376,7 +382,7 @@ async fn verify(
         }
     }
     let (kind, seed, difficulty, created_ts, issuer_ip) = {
-        let mut store = s.store.lock().await;
+        let mut store = s.store.lock();
         let stored = match store.get(&sol.challenge_id) {
             Some(c) => c,
             None => return err("unknown challenge"),
@@ -454,9 +460,9 @@ async fn verify(
         flag_profile(&s, &ip, 0.3).await;
         return err(m);
     }
-    let mut trajectory = String::new();
+    let mut trajectory = String::with_capacity(sol.clicks.len() * 16);
     for c in &sol.clicks {
-        trajectory.push_str(&format!("{},{},{};", c.x as i64, c.y as i64, c.t as i64));
+        let _ = write!(trajectory, "{},{},{};", c.x as i64, c.y as i64, c.t as i64);
     }
     let x = s
         .params
@@ -475,7 +481,7 @@ async fn verify(
     };
     let ok = s.params.verify(&x, difficulty, &vdf_proof);
     if ok {
-        s.store.lock().await.remove(&sol.challenge_id);
+        s.store.lock().remove(&sol.challenge_id);
         record_profile_success(&s, &ip).await;
         let iat = now_secs();
         let claims = TokenClaims {
@@ -505,7 +511,7 @@ async fn verify(
 
 async fn flag_profile(s: &Arc<AppState>, ip: &str, weight: f64) {
     let now = Instant::now();
-    let mut profiles = s.profiles.lock().await;
+    let mut profiles = s.profiles.lock();
     let p = profiles
         .entry(ip.to_string())
         .or_insert_with(|| ClientProfile::new(now));
@@ -514,7 +520,7 @@ async fn flag_profile(s: &Arc<AppState>, ip: &str, weight: f64) {
 
 async fn record_profile_success(s: &Arc<AppState>, ip: &str) {
     let now = Instant::now();
-    let mut profiles = s.profiles.lock().await;
+    let mut profiles = s.profiles.lock();
     let p = profiles
         .entry(ip.to_string())
         .or_insert_with(|| ClientProfile::new(now));
@@ -523,7 +529,7 @@ async fn record_profile_success(s: &Arc<AppState>, ip: &str) {
 
 async fn record_profile_failure(s: &Arc<AppState>, ip: &str) {
     let now = Instant::now();
-    let mut profiles = s.profiles.lock().await;
+    let mut profiles = s.profiles.lock();
     let p = profiles
         .entry(ip.to_string())
         .or_insert_with(|| ClientProfile::new(now));
