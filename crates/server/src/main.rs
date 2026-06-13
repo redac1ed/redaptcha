@@ -455,7 +455,7 @@ async fn verify(
     ) {
         flag_profile(&s, &ip, weight).await;
     }
-    if let Err(m) = puzzle.grade(&s.challenge_key, &sol.challenge_id, &sol.clicks) {
+    if let Err(m) = puzzle.grade(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.3).await;
         return err(m);
@@ -479,6 +479,25 @@ async fn verify(
         output,
         proof: proof_val,
     };
+    let rounds_required = puzzle.rounds();
+    if rounds_required > 1 {
+        let now = Instant::now();
+        let count = {
+            let mut profiles = s.profiles.lock();
+            let profile = profiles
+                .entry(ip.clone())
+                .or_insert_with(|| ClientProfile::new(now));
+            profile.record_round(&kind, now, Duration::from_secs(120))
+        };
+        if count < rounds_required {
+            return Json(VerifyResponse {
+                ok: true,
+                token: None,
+                message: format!("round {} of {} complete", count, rounds_required),
+            });
+        }
+        s.profiles.lock().entry(ip.clone()).and_modify(|p| p.reset_rounds(&kind));
+    }
     let ok = s.params.verify(&x, difficulty, &vdf_proof);
     if ok {
         s.store.lock().remove(&sol.challenge_id);

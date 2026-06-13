@@ -40,7 +40,7 @@ impl Captcha for MovingBall {
     fn validate(&self, clicks: &[Click]) -> Result<(), &'static str> {
         validate_clicks(clicks)
     }
-    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click]) -> Result<(), &'static str> {
+    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], _trail: &[core_types::TrailPoint],) -> Result<(), &'static str> {
         let movers = gen_movers_from(challenge_key, challenge_id);
         grade_clicks(&movers, clicks)
     }
@@ -78,7 +78,7 @@ fn fill_circle(img: &mut RgbaImage, cx: f64, cy: f64, r: f64, color: [u8; 4]) {
     let x1 = ((cx + r).ceil() as i64).clamp(0, iw as i64) as u32;
     let y0 = (cy - r).floor().max(0.0) as u32;
     let y1 = ((cy + r).ceil() as i64).clamp(0, ih as i64) as u32;
-    let buf = img.as_mut(); // &mut [u8], RGBA8 row-major
+    let buf = img.as_mut();
     for y in y0..y1 {
         let row = (y as usize) * (iw as usize) * 4;
         let dy = y as f64 + 0.5 - cy;

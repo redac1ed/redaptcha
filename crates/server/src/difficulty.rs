@@ -34,6 +34,7 @@ pub struct ClientProfile {
     pub suspicion: f64,
     pub verify_count: u32,
     pub verify_window_start: Instant,
+    pub solved_rounds: std::collections::HashMap<String, (u32, Instant)>
 }
 
 pub struct TrailStats {
@@ -68,6 +69,7 @@ impl ClientProfile {
             suspicion: 0.0,
             verify_count: 0,
             verify_window_start: now,
+            solved_rounds: std::collections::HashMap::new(),
         }
     }
     pub fn roll_window(&mut self, now: Instant) {
@@ -101,6 +103,18 @@ impl ClientProfile {
         }
         self.verify_count += 1;
         true
+    }
+    pub fn record_round(&mut self, kind: &str, now: Instant, window: Duration) -> u32 {
+        let entry = self.solved_rounds.entry(kind.to_string()).or_insert((0, now));
+        if now.duration_since(entry.1) > window {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        entry.1 = now;
+        entry.0
+    }
+    pub fn reset_rounds(&mut self, kind: &str) {
+        self.solved_rounds.remove(kind);
     }
     pub fn record_failure(&mut self) {
         self.failures = self.failures.saturating_add(1);

@@ -89,6 +89,7 @@ function createCaptcha(card) {
   let dragDX = 0;
   let dragDY = 0;
   let sliderRound = 0;
+  let sliderRounds = SLIDER_ROUNDS;
   let sliderDropped = false;
   let rafID = 0;
 
@@ -178,7 +179,7 @@ function createCaptcha(card) {
   function setProgress() {
     if (!progressEl) return;
     if (isSlider) {
-      progressEl.textContent = `Round ${sliderRound + 1} / ${SLIDER_ROUNDS}`;
+      progressEl.textContent = `Round ${Math.min(sliderRound + 1, sliderRounds)} / ${sliderRounds}`;
     } else {
       progressEl.textContent = `${panelIdx} / ${EXPECTED_CLICKS} done`;
     }
@@ -311,17 +312,20 @@ function createCaptcha(card) {
       });
       const result = await res.json();
       if (result.ok && result.token) {
-        if (isSlider && sliderRound < SLIDER_ROUNDS - 1) {
-          sliderRound += 1;
-          if (worker) { worker.terminate(); worker = null; }
-          statusEl.textContent = `Round ${sliderRound + 1} of ${SLIDER_ROUNDS}…`;
-          await startChallenge();
-          return;
-        }
         state = "success";
         statusEl.textContent = "Success!";
         setUi();
         unlockContent(result.token);
+        return;
+      } else if (result.ok && !result.token) {
+        if (worker) { worker.terminate(); worker = null; }
+        const m = /round\s+(\d+)\s+of\s+(\d+)/i.exec(result.message || "");
+        if (m) {
+          sliderRound = Number(m[1]);
+          sliderRounds = Number(m[2]);
+        }
+        statusEl.textContent = result.message || "Next round…";
+        await startChallenge();
         return;
       } else {
         state = "failed";
@@ -361,6 +365,7 @@ function createCaptcha(card) {
     dragDY = 0;
     pieceImg = null;
     sliderRound = 0;
+    sliderRounds = SLIDER_ROUNDS;
     sliderDropped = false; 
     if (progressEl) progressEl.textContent = "";
     timerBar.style.opacity = "0";

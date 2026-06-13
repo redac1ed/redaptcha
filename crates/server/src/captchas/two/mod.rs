@@ -1,6 +1,6 @@
 use std::io::Cursor;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use core_types::{Click, SliderHint};
+use core_types::{Click, SliderHint, TrailPoint};
 use image::{ImageEncoder, Rgba, RgbaImage};
 
 use crate::captcha::{Captcha, Rendered};
@@ -16,12 +16,17 @@ const TOLERANCE: f64 = 16.0;
 const MIN_TOTAL_MS: f64 = 200.0;
 const MAX_TOTAL_MS: f64 = 15_000.0;
 const EDGE: f64 = 8.0;
+const MIN_DROP_TRAVEL: f64 = 10.0;
+const MIN_TRAIL_POINTS: usize = 5;
+const MAX_TELEPORT_FRAC: f64 = 0.5;
+const APPROACH_FRAC: f64 = 0.6;
 
 pub struct Slider;
 
 impl Captcha for Slider {
     fn kind(&self) -> &'static str { "two" }
     fn expected_clicks(&self) -> usize { EXPECTED_CLICKS }
+    fn rounds(&self) -> u32 { 3 }
     fn puzzle_w(&self) -> f64 { PUZZLE_W as f64 }
     fn puzzle_h(&self) -> f64 { PUZZLE_H as f64 }
     fn generate(&self, challenge_key: &[u8], challenge_id: &str) -> Rendered {
@@ -64,17 +69,53 @@ impl Captcha for Slider {
         }
         Ok(())
     }
-    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click]) -> Result<(), &'static str> {
+    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint],) -> Result<(), &'static str> {
         let mut rng = derive_rng(challenge_key, challenge_id);
         let (tx, ty) = target_pos(&mut rng);
+        let grab = &clicks[0];
         let drop = &clicks[1];
+        let travel = ((drop.x - grab.x).powi(2) + (drop.y - grab.y).powi(2)).sqrt();
+        if travel < MIN_DROP_TRAVEL {
+            return Err("piece barely moved");
+        }
         let dx = drop.x - tx;
         let dy = drop.y - ty;
-        if dx.abs() <= TOLERANCE && dy.abs() <= TOLERANCE {
-            Ok(())
-        } else {
-            Err("piece not aligned")
+        if dx.abs() > TOLERANCE || dy.abs() > TOLERANCE {
+            return Err("piece not aligned");
         }
+        if trail.len() < MIN_TRAIL_POINTS {
+            return Err("no drag movement");
+        }
+        let mut path_len = 0.0;
+        let mut max_step = 0.0;
+        for w in trail.windows(2) {
+            let d = ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt();
+            path_len += d;
+            if d > max_step {
+                max_step = d;
+            }
+        }
+        if path_len <= 0.0 {
+            return Err("no drag movement");
+        }
+        if max_step / path_len > MAX_TELEPORT_FRAC {
+            return Err("teleport detected");
+        }
+        let off_x = trail[0].x - grab.x;
+        let off_y = trail[0].y - grab.y;
+        let start_dist = {
+            let p = &trail[0];
+            (((p.x - off_x) - tx).powi(2) + ((p.y - off_y) - ty).powi(2)).sqrt()
+        };
+        let end_dist = {
+            let p = trail.last().unwrap();
+            (((p.x - off_x) - tx).powi(2) + ((p.y - off_y) - ty).powi(2)).sqrt()
+        };
+        if start_dist > 0.0 && end_dist > start_dist * APPROACH_FRAC {
+            return Err("drag did not approach target");
+        }
+
+        Ok(())
     }
 }
 
@@ -265,16 +306,22 @@ fn encode(img: &RgbaImage) -> String {
 mod tests {
     use super::*;
     use core_types::Click;
-
     fn click(x: f64, y: f64, t: f64) -> Click {
         Click { x, y, t }
     }
-
     fn target(key: &[u8], id: &str) -> (f64, f64) {
         let mut rng = derive_rng(key, id);
         target_pos(&mut rng)
     }
-
+    fn straight_trail(sx: f64, sy: f64, ex: f64, ey: f64) -> Vec<TrailPoint> {
+        let n = 8;
+        (0..=n)
+            .map(|i| {
+                let f = i as f64 / n as f64;
+                TrailPoint { x: sx + (ex - sx) * f, y: sy + (ey - sy) * f, t: f * 900.0 }
+            })
+            .collect()
+    }
     #[test]
     fn grades_aligned_drop() {
         let s = Slider;
@@ -282,10 +329,10 @@ mod tests {
         let id = "abc-123";
         let (tx, ty) = target(key, id);
         let clicks = vec![click(0.0, 0.0, 0.0), click(tx, ty, 900.0)];
+        let trail = straight_trail(0.0, 0.0, tx, ty);
         assert!(s.validate(&clicks).is_ok());
-        assert!(s.grade(key, id, &clicks).is_ok());
+        assert!(s.grade(key, id, &clicks, &trail).is_ok());
     }
-
     #[test]
     fn rejects_misaligned_drop() {
         let s = Slider;
@@ -293,15 +340,19 @@ mod tests {
         let id = "abc-123";
         let (tx, ty) = target(key, id);
         let clicks = vec![click(0.0, 0.0, 0.0), click(tx + 40.0, ty, 900.0)];
+        let trail = straight_trail(0.0, 0.0, tx + 40.0, ty);
         assert!(s.validate(&clicks).is_ok());
-        assert!(s.grade(key, id, &clicks).is_err());
+        assert!(s.grade(key, id, &clicks, &trail).is_err());
     }
-
     #[test]
     fn rejects_wrong_click_count() {
         let s = Slider;
+        let key = b"test-key-0000000000000000000000";
+        let id = "abc-123";
         let clicks = vec![click(0.0, 0.0, 0.0)];
+        let trail = straight_trail(0.0, 0.0, 0.0, 0.0);
         assert!(s.validate(&clicks).is_err());
+        assert!(s.grade(key, id, &clicks, &trail).is_err());
     }
 }
 
