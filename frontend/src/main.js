@@ -6,6 +6,68 @@ const EXPECTED_CLICKS = 3;
 const HIT_R = 22;
 const SLIDER_ROUNDS = 3;
 
+const session = {
+  pageLoad: Date.now(),
+  firstMove: null,
+  focus: 0,
+  blur: 0,
+  scroll: 0,
+  key: 0,
+  move: 0,
+  hasTouch: false,
+  maxPressure: 0,
+  pointerKinds: new Set(),
+  hiddenStart: null,
+  hiddenMs: 0,
+};
+
+function setupTelemetry() {
+  window.addEventListener("focus", () => { session.focus += 1; });
+  window.addEventListener("blur", () => { session.blur += 1; });
+  window.addEventListener("scroll", () => { session.scroll += 1; }, { passive: true });
+  window.addEventListener("keydown", () => { session.key += 1; });
+  window.addEventListener("pointermove", (e) => {
+    session.move += 1;
+    if (session.firstMove === null) session.firstMove = Date.now() - session.pageLoad;
+    if (e.pointerType) session.pointerKinds.add(e.pointerType);
+    if (e.pointerType === "touch" || e.pointerType === "pen") session.hasTouch = true;
+    if (typeof e.pressure === "number" && e.pressure > session.maxPressure) {
+      session.maxPressure = e.pressure;
+    }
+  }, { passive: true });
+  if (navigator.maxTouchPoints > 0 || "ontouchstart" in window) session.hasTouch = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      session.hiddenStart = Date.now();
+    } else if (session.hiddenStart !== null) {
+      session.hiddenMs += Date.now() - session.hiddenStart;
+      session.hiddenStart = null;
+    }
+  });
+}
+
+function telemetrySnapshot() {
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    page_load_to_first_move_ms: session.firstMove,
+    focus_events: session.focus,
+    blur_events: session.blur,
+    scroll_events: session.scroll,
+    key_events: session.key,
+    move_events: session.move,
+    has_touch: session.hasTouch,
+    max_pressure: session.maxPressure,
+    pointer_kinds: Array.from(session.pointerKinds),
+    screen_w: screen.width,
+    screen_h: screen.height,
+    viewport_w: window.innerWidth,
+    viewport_h: window.innerHeight,
+    device_pixel_ratio: dpr,
+    webdriver: navigator.webdriver === true,
+    hidden_time_ms: session.hiddenMs,
+  };
+}
+
 function setupCarousel() {
   const scroller = document.getElementById("captcha-scroller");
   const prevBtn = document.getElementById("carousel-prev");
@@ -79,6 +141,7 @@ function createCaptcha(card) {
   let flashUntil = 0;
   let inputType = "mouse";
   let pointerDown = false;
+  let touchClickPending = false;
   let sliderHint = null;
   let pieceX = 0;
   let pieceY = 0;
@@ -103,6 +166,38 @@ function createCaptcha(card) {
 
   function tTotal() {
     return frameCount * frameDt;
+  }
+
+  const CORE_R = 7;
+  const CORE_LUM_THRESHOLD = 175;
+
+  function isBallPixel(cx, cy) {
+    const scan = CORE_R + (inputType === "touch" ? 5 : 0);
+    const x0 = Math.max(0, Math.floor(cx - scan));
+    const y0 = Math.max(0, Math.floor(cy - scan));
+    const x1 = Math.min(W, Math.ceil(cx + scan));
+    const y1 = Math.min(H, Math.ceil(cy + scan));
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w <= 0 || h <= 0) return false;
+    let img;
+    try {
+      img = ctx.getImageData(x0, y0, w, h).data;
+    } catch {
+      return true;
+    }
+    const r2 = scan * scan;
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const dx = x0 + x + 0.5 - cx;
+        const dy = y0 + y + 0.5 - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        const i = (y * w + x) * 4;
+        const lum = img[i] * 0.299 + img[i + 1] * 0.587 + img[i + 2] * 0.114;
+        if (lum > CORE_LUM_THRESHOLD) return true;
+      }
+    }
+    return false;
   }
 
   function ballPosAtFrame(idx) {
@@ -237,6 +332,7 @@ function createCaptcha(card) {
     trail = [];
     panelIdx = 0;
     flashUntil = 0;
+    touchClickPending = false;
     puzzleStart = Date.now();
     if (isSlider && sliderHint) {
       pieceImg = panelStrips[1] || null;
@@ -246,7 +342,7 @@ function createCaptcha(card) {
       sliderDropped = false;
       statusEl.textContent = "Drag the piece into the gap";
     } else {
-      statusEl.textContent = "Click the moving ball";
+      statusEl.textContent = "Click a ball with a bright center";
     }
     deadline = Date.now() + TIME_LIMIT;
     setProgress();
@@ -263,7 +359,7 @@ function createCaptcha(card) {
       puzzleSolved();
       return;
     }
-    statusEl.textContent = "Click the moving ball";
+    statusEl.textContent = "Click a ball with a bright center";
   }
 
   function puzzleSolved() {
@@ -308,6 +404,7 @@ function createCaptcha(card) {
           trail,
           sig: challenge.sig,
           input_type: inputType,
+          telemetry: telemetrySnapshot(),
         }),
       });
       const result = await res.json();
@@ -354,6 +451,7 @@ function createCaptcha(card) {
     panelMotions = [];
     panelIdx = 0;
     flashUntil = 0;
+    touchClickPending = false;
     inputType = "mouse";
     pointerDown = false;
     sliderHint = null;
@@ -385,17 +483,17 @@ function createCaptcha(card) {
     if (state !== "active") return;
     if (isSlider) return;
     if (Date.now() < flashUntil) return;
+    if (touchClickPending) { touchClickPending = false; return; }
     const rect = canvas.getBoundingClientRect();
     const cx = (e.clientX - rect.left) * (W / rect.width);
     const cy = (e.clientY - rect.top) * (H / rect.height);
-    const t = Date.now() - puzzleStart;
-    const seenIdx = Math.floor(t / frameDt) % frameCount;
-    const { cx: bx, cy: by } = ballPosAtFrame(seenIdx);
-    const hit = Math.hypot(cx - bx, cy - by) <= HIT_R;
-    if (!hit) {
-      statusEl.textContent = "Missed — click the ball";
+    if (!isBallPixel(cx, cy)) {
+      statusEl.textContent = "Missed - click a ball with a bright center";
       return;
     }
+    const t = Date.now() - puzzleStart;
+    trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
+    if (trail.length > 400) trail.shift();
     clicks.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
     flashUntil = Date.now() + 350;
     statusEl.textContent = "Nice!";
@@ -409,8 +507,22 @@ function createCaptcha(card) {
     const rect = canvas.getBoundingClientRect();
     const cx = (e.clientX - rect.left) * (W / rect.width);
     const cy = (e.clientY - rect.top) * (H / rect.height);
-    trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(Date.now() - puzzleStart) });
+    const t = Date.now() - puzzleStart;
+    trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
     if (trail.length > 400) trail.shift();
+    if (e.pointerType === "touch" && Date.now() >= flashUntil) {
+      if (!isBallPixel(cx, cy)) {
+        statusEl.textContent = "Missed - tap a ball with a bright center";
+        return;
+      }
+      touchClickPending = true;
+      trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
+      if (trail.length > 400) trail.shift();
+      clicks.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
+      flashUntil = Date.now() + 350;
+      statusEl.textContent = "Nice!";
+      setTimeout(advancePanel, 360);
+    }
   });
   canvas.addEventListener("pointermove", (e) => {
     if (state !== "active") return;
@@ -470,3 +582,4 @@ function createCaptcha(card) {
 
 document.querySelectorAll(".captcha-card").forEach(createCaptcha);
 setupCarousel();
+setupTelemetry();

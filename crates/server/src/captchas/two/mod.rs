@@ -13,8 +13,6 @@ const PIECE: f64 = 52.0;
 const KNOB: f64 = 11.0;
 const BBOX: f64 = PIECE + KNOB * 2.0;
 const TOLERANCE: f64 = 16.0;
-const MIN_TOTAL_MS: f64 = 200.0;
-const MAX_TOTAL_MS: f64 = 15_000.0;
 const EDGE: f64 = 8.0;
 const MIN_DROP_TRAVEL: f64 = 10.0;
 const MIN_TRAIL_POINTS: usize = 5;
@@ -39,7 +37,6 @@ impl Captcha for Slider {
         let piece = render_piece(&bg, &mask, tx, ty);
         Rendered {
             frames_b64: vec![encode(&board), encode(&piece)],
-            motions: vec![],
             slider: Some(SliderHint {
                 piece_w: BBOX,
                 piece_h: BBOX,
@@ -48,28 +45,10 @@ impl Captcha for Slider {
             }),
         }
     }
-    fn validate(&self, clicks: &[Click]) -> Result<(), &'static str> {
+    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint],) -> Result<(), &'static str> {
         if clicks.len() != EXPECTED_CLICKS {
             return Err("wrong click count");
         }
-        for c in clicks {
-            if !c.x.is_finite() || !c.y.is_finite() || !c.t.is_finite() {
-                return Err("non-finite click");
-            }
-            if c.x < -BBOX || c.x > PUZZLE_W as f64 || c.y < -BBOX || c.y > PUZZLE_H as f64 {
-                return Err("click out of bounds");
-            }
-        }
-        if clicks[1].t < clicks[0].t {
-            return Err("non-monotonic clicks");
-        }
-        let total = clicks[1].t - clicks[0].t;
-        if total < MIN_TOTAL_MS || total > MAX_TOTAL_MS {
-            return Err("solve time implausible");
-        }
-        Ok(())
-    }
-    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint],) -> Result<(), &'static str> {
         let mut rng = derive_rng(challenge_key, challenge_id);
         let (tx, ty) = target_pos(&mut rng);
         let grab = &clicks[0];
@@ -330,7 +309,6 @@ mod tests {
         let (tx, ty) = target(key, id);
         let clicks = vec![click(0.0, 0.0, 0.0), click(tx, ty, 900.0)];
         let trail = straight_trail(0.0, 0.0, tx, ty);
-        assert!(s.validate(&clicks).is_ok());
         assert!(s.grade(key, id, &clicks, &trail).is_ok());
     }
     #[test]
@@ -341,7 +319,6 @@ mod tests {
         let (tx, ty) = target(key, id);
         let clicks = vec![click(0.0, 0.0, 0.0), click(tx + 40.0, ty, 900.0)];
         let trail = straight_trail(0.0, 0.0, tx + 40.0, ty);
-        assert!(s.validate(&clicks).is_ok());
         assert!(s.grade(key, id, &clicks, &trail).is_err());
     }
     #[test]
@@ -351,7 +328,6 @@ mod tests {
         let id = "abc-123";
         let clicks = vec![click(0.0, 0.0, 0.0)];
         let trail = straight_trail(0.0, 0.0, 0.0, 0.0);
-        assert!(s.validate(&clicks).is_err());
         assert!(s.grade(key, id, &clicks, &trail).is_err());
     }
 }

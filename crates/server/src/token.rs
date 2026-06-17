@@ -14,6 +14,7 @@ pub struct TokenClaims {
     pub ip: String,
     pub issued_at: u64,
     pub expires_at: u64,
+    pub score: f64,
 }
 
 pub fn now_secs() -> u64 {
@@ -35,15 +36,20 @@ fn b64url_decode(text: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(text.as_bytes()).ok()
 }
 
+fn format_score(score: f64) -> String {
+    format!("{:.4}", score.clamp(0.0, 1.0))
+}
+
 pub fn sign(key: &[u8], claims: &TokenClaims) -> String {
     let payload = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         claims.challenge_id,
         claims.site_key,
         claims.hostname,
         claims.ip,
         claims.issued_at,
-        claims.expires_at
+        claims.expires_at,
+        format_score(claims.score)
     );
     let encoded = b64url(payload.as_bytes());
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
@@ -67,11 +73,12 @@ pub fn verify(key: &[u8], token: &str) -> Option<TokenClaims> {
     let raw = b64url_decode(encoded)?;
     let payload = String::from_utf8(raw).ok()?;
     let parts: Vec<&str> = payload.split('|').collect();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return None;
     }
     let issued_at: u64 = parts[4].parse().ok()?;
     let expires_at: u64 = parts[5].parse().ok()?;
+    let score: f64 = parts[6].parse().ok()?;
     if now_secs() > expires_at {
         return None;
     }
@@ -82,6 +89,7 @@ pub fn verify(key: &[u8], token: &str) -> Option<TokenClaims> {
         ip: parts[3].to_string(),
         issued_at,
         expires_at,
+        score,
     })
 }
 
@@ -133,6 +141,7 @@ mod tests {
             ip: "203.0.113.7".into(),
             issued_at: iat,
             expires_at: iat + TOKEN_TTL_SECS,
+            score: 0.8123,
         }
     }
     #[test]
@@ -143,6 +152,7 @@ mod tests {
         assert_eq!(parsed.site_key, "site_abc");
         assert_eq!(parsed.hostname, "example.com");
         assert_eq!(parsed.ip, "203.0.113.7");
+        assert!((parsed.score - 0.8123).abs() < 1e-3);
     }
     #[test]
     fn wrong_key_rejected() {
@@ -169,6 +179,7 @@ mod tests {
             ip: "198.51.100.1".into(),
             issued_at: iat,
             expires_at: iat + 10,
+            score: 0.5,
         };
         let t = sign(&key, &c);
         assert!(verify(&key, &t).is_none());

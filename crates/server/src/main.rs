@@ -19,7 +19,10 @@ use std::{
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use core_types::{Challenge, ChallengeRequest, Solution, VerifyResponse};
-use difficulty::{difficulty_for, ClientProfile, GlobalLimiter, FRAME_COUNT, FRAME_DT_MS};
+use difficulty::{
+    difficulty_for, is_headless, pursuit_coherent, trust_decision, trust_score, ClientProfile,
+    GlobalLimiter, TrustDecision, TrustInputs, FRAME_COUNT, FRAME_DT_MS,
+};
 use num_bigint::BigUint;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -67,7 +70,7 @@ struct ContentResp {
     content: Option<String>,
 }
 
-fn is_production() -> bool {
+pub fn is_production() -> bool {
     matches!(
         std::env::var("REDAPTCHA_ENV").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
         "production" | "prod"
@@ -211,6 +214,7 @@ fn err(message: &str) -> Json<VerifyResponse> {
         ok: false,
         token: None,
         message: message.into(),
+        score: None,
     })
 }
 
@@ -281,7 +285,6 @@ async fn issue(
     let seed_hex = hex::encode(seed);
     let rendered = puzzle.generate(&s.challenge_key, &id);
     let frames_b64 = rendered.frames_b64;
-    let motions = rendered.motions;
     let slider = rendered.slider;
     let created_ts = now_secs();
     {
@@ -307,7 +310,6 @@ async fn issue(
         modulus_hex: s.modulus_hex.clone(),
         difficulty,
         frames_b64,
-        motions,
         frame_count: FRAME_COUNT,
         frame_dt_ms: FRAME_DT_MS,
         puzzle_w: puzzle.puzzle_w(),
@@ -428,37 +430,95 @@ async fn verify(
         flag_profile(&s, &ip, 0.5).await;
         return err("invalid challenge signature");
     }
-    if let Err(m) = puzzle.validate(&sol.clicks) {
-        record_profile_failure(&s, &ip).await;
-        flag_profile(&s, &ip, 0.3).await;
-        return err(m);
-    }
-    let trail: Vec<(f64, f64, f64)> = sol.trail.iter().map(|p| (p.x, p.y, p.t)).collect();
     let is_touch = sol.input_type.eq_ignore_ascii_case("touch")
-        || sol.input_type.eq_ignore_ascii_case("pen");
-    match difficulty::grade_trail(&trail, is_touch) {
-        Ok(weight) => {
-            if weight > 0.0 {
-                flag_profile(&s, &ip, weight).await;
-            }
-        }
-        Err(m) => {
-            record_profile_failure(&s, &ip).await;
-            flag_profile(&s, &ip, 0.4).await;
-            return err(m);
-        }
-    }
-    if let Some(weight) = difficulty::classify_timing(
+        || sol.input_type.eq_ignore_ascii_case("pen")
+        || sol.telemetry.has_touch;
+    let trail: Vec<(f64, f64, f64)> = sol.trail.iter().map(|p| (p.x, p.y, p.t)).collect();
+    let trail_weight = match difficulty::grade_trail(&trail, is_touch) {
+        Ok(w) => w,
+        Err(_) => 0.2,
+    };
+    let timing_weight = difficulty::classify_timing(
         sol.clicks.last().map(|c| c.t).unwrap_or(0.0)
             - sol.clicks.first().map(|c| c.t).unwrap_or(0.0),
         sol.clicks.len(),
-    ) {
-        flag_profile(&s, &ip, weight).await;
-    }
+    )
+    .unwrap_or(0.0);
     if let Err(m) = puzzle.grade(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
         record_profile_failure(&s, &ip).await;
         flag_profile(&s, &ip, 0.3).await;
         return err(m);
+    }
+    if !is_touch && puzzle.kind() == "one" {
+        let click_tuples: Vec<(f64, f64, f64)> = sol.clicks.iter().map(|c| (c.x, c.y, c.t)).collect();
+        if let Err(m) = pursuit_coherent(&trail, &click_tuples) {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.3).await;
+            log_reject(&ip, m, None);
+            return err("verification failed");
+        }
+    }
+    let (suspicion, fail_ratio) = {
+        let mut profiles = s.profiles.lock();
+        let p = profiles
+            .entry(ip.clone())
+            .or_insert_with(|| ClientProfile::new(Instant::now()));
+        (p.suspicion, p.fail_ratio())
+    };
+    let t = &sol.telemetry;
+    let trust_inputs = TrustInputs {
+        trail_weight,
+        timing_weight,
+        grade_score: 1.0,
+        suspicion,
+        fail_ratio,
+        page_load_to_first_move_ms: t.page_load_to_first_move_ms,
+        focus_events: t.focus_events,
+        blur_events: t.blur_events,
+        scroll_events: t.scroll_events,
+        key_events: t.key_events,
+        move_events: t.move_events,
+        has_touch: t.has_touch,
+        max_pressure: t.max_pressure,
+        webdriver: t.webdriver,
+        input_type: sol.input_type.clone(),
+    };
+    if is_headless(&trust_inputs) {
+        record_profile_failure(&s, &ip).await;
+        flag_profile(&s, &ip, 0.4).await;
+        log_reject(&ip, "headless signature", None);
+        return Json(VerifyResponse {
+            ok: false,
+            token: None,
+            message: "verification failed".into(),
+            score: Some(0.0),
+        });
+    }
+    let trust = trust_score(&trust_inputs);
+    match trust_decision(trust) {
+        TrustDecision::Pass => {}
+        TrustDecision::StepUp => {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.15).await;
+            log_reject(&ip, "trust step-up", Some(trust));
+            return Json(VerifyResponse {
+                ok: true,
+                token: None,
+                message: "additional verification required".into(),
+                score: Some(trust),
+            });
+        }
+        TrustDecision::Fail => {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.25).await;
+            log_reject(&ip, "trust fail", Some(trust));
+            return Json(VerifyResponse {
+                ok: false,
+                token: None,
+                message: "verification failed".into(),
+                score: Some(trust),
+            });
+        }
     }
     let mut trajectory = String::with_capacity(sol.clicks.len() * 16);
     for c in &sol.clicks {
@@ -494,6 +554,7 @@ async fn verify(
                 ok: true,
                 token: None,
                 message: format!("round {} of {} complete", count, rounds_required),
+                score: Some(trust),
             });
         }
         s.profiles.lock().entry(ip.clone()).and_modify(|p| p.reset_rounds(&kind));
@@ -510,12 +571,14 @@ async fn verify(
             ip: ip.clone(),
             issued_at: created_ts.max(iat.saturating_sub(TTL.as_secs())),
             expires_at: iat + TOKEN_TTL_SECS,
+            score: trust,
         };
         let signed = token::sign(&s.token_key, &claims);
         Json(VerifyResponse {
             ok: true,
             token: Some(signed),
             message: "verified".into(),
+            score: Some(trust),
         })
     } else {
         record_profile_failure(&s, &ip).await;
@@ -524,7 +587,15 @@ async fn verify(
             ok: false,
             token: None,
             message: "proof invalid".into(),
+            score: Some(trust),
         })
+    }
+}
+
+fn log_reject(ip: &str, reason: &str, score: Option<f64>) {
+    match score {
+        Some(s) => eprintln!("reject ip={ip} reason={reason} score={s:.3}"),
+        None => eprintln!("reject ip={ip} reason={reason}"),
     }
 }
 

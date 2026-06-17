@@ -150,12 +150,7 @@ async fn read_resp(r: &mut BufReader<impl AsyncReadExt + Unpin>) -> Result<Vec<u
     }
 }
 
-fn is_production() -> bool {
-    matches!(
-        std::env::var("REDAPTCHA_ENV").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
-        "production" | "prod"
-    )
-}
+use crate::is_production;
 
 impl RedeemStore {
     pub async fn from_env() -> Self {

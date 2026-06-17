@@ -1,8 +1,7 @@
-use core_types::{Click, PanelMotion, SliderHint, TrailPoint};
+use core_types::{Click, SliderHint, TrailPoint};
 
 pub struct Rendered {
     pub frames_b64: Vec<String>,
-    pub motions: Vec<PanelMotion>,
     pub slider: Option<SliderHint>,
 }
 
@@ -15,6 +14,5 @@ pub trait Captcha {
     fn puzzle_w(&self) -> f64;
     fn puzzle_h(&self) -> f64;
     fn generate(&self, challenge_key: &[u8], challenge_id: &str) -> Rendered;
-    fn validate(&self, clicks: &[Click]) -> Result<(), &'static str>;
-    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint],) -> Result<(), &'static str>;
+    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint]) -> Result<(), &'static str>;
 }

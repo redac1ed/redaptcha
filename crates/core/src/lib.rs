@@ -8,7 +8,6 @@ pub struct Challenge {
     pub modulus_hex: String,
     pub difficulty: u64,
     pub frames_b64: Vec<String>,
-    pub motions: Vec<PanelMotion>,
     #[serde(default)]
     pub slider: Option<SliderHint>,
     pub frame_count: u32,
@@ -16,16 +15,6 @@ pub struct Challenge {
     pub puzzle_w: f64,
     pub puzzle_h: f64,
     pub sig: String,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PanelMotion {
-    pub cx: f64,
-    pub cy: f64,
-    pub amp: f64,
-    pub turns: f64,
-    pub phase: f64,
-    pub dir: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -68,6 +57,46 @@ pub struct ChallengeRequest {
     pub hostname: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionTelemetry {
+    #[serde(default)]
+    pub page_load_to_first_move_ms: Option<f64>,
+    #[serde(default)]
+    pub focus_events: u32,
+    #[serde(default)]
+    pub blur_events: u32,
+    #[serde(default)]
+    pub scroll_events: u32,
+    #[serde(default)]
+    pub key_events: u32,
+    #[serde(default)]
+    pub move_events: u32,
+    #[serde(default)]
+    pub has_touch: bool,
+    #[serde(default)]
+    pub max_pressure: f64,
+    #[serde(default)]
+    pub pointer_kinds: Vec<String>,
+    #[serde(default)]
+    pub screen_w: Option<u32>,
+    #[serde(default)]
+    pub screen_h: Option<u32>,
+    #[serde(default)]
+    pub viewport_w: Option<u32>,
+    #[serde(default)]
+    pub viewport_h: Option<u32>,
+    #[serde(default = "default_dpr")]
+    pub device_pixel_ratio: f64,
+    #[serde(default)]
+    pub webdriver: bool,
+    #[serde(default)]
+    pub hidden_time_ms: f64,
+}
+
+fn default_dpr() -> f64 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Solution {
     pub challenge_id: String,
@@ -80,6 +109,8 @@ pub struct Solution {
     pub sig: String,
     #[serde(default)]
     pub input_type: String,
+    #[serde(default)]
+    pub telemetry: SessionTelemetry,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,4 +118,6 @@ pub struct VerifyResponse {
     pub ok: bool,
     pub token: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
