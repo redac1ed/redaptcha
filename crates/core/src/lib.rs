@@ -7,6 +7,8 @@ pub struct Challenge {
     pub seed_hex: String,
     pub modulus_hex: String,
     pub difficulty: u64,
+    pub nonce: String,
+    pub expires_at: u64,
     pub frames_b64: Vec<String>,
     #[serde(default)]
     pub slider: Option<SliderHint>,
@@ -14,6 +16,8 @@ pub struct Challenge {
     pub frame_dt_ms: f64,
     pub puzzle_w: f64,
     pub puzzle_h: f64,
+    #[serde(default)]
+    pub instr: Option<String>,
     pub sig: String,
 }
 
@@ -91,6 +95,30 @@ pub struct SessionTelemetry {
     pub webdriver: bool,
     #[serde(default)]
     pub hidden_time_ms: f64,
+    #[serde(default)]
+    pub canvas_hash: Option<String>,
+    #[serde(default)]
+    pub webgl_hash: Option<String>,
+    #[serde(default)]
+    pub webgl_vendor: Option<String>,
+    #[serde(default)]
+    pub timezone_offset_min: Option<i32>,
+    #[serde(default)]
+    pub timezone_name: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub hardware_concurrency: Option<u32>,
+    #[serde(default)]
+    pub device_memory: Option<f64>,
+    #[serde(default)]
+    pub perf_jitter: Vec<f64>,
+    #[serde(default)]
+    pub nonce_echo: Option<String>,
 }
 
 fn default_dpr() -> f64 {
@@ -110,6 +138,8 @@ pub struct Solution {
     #[serde(default)]
     pub input_type: String,
     #[serde(default)]
+    pub instr_result: Option<u32>,
+    #[serde(default)]
     pub telemetry: SessionTelemetry,
 }
 
@@ -120,4 +150,6 @@ pub struct VerifyResponse {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need_challenge:Option<String>,
 }

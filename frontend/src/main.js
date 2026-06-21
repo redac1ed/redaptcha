@@ -19,9 +19,10 @@ const session = {
   pointerKinds: new Set(),
   hiddenStart: null,
   hiddenMs: 0,
+  moveTrail: [],
 };
 
-function setupTelemetry() {
+export function setupTelemetry() {
   window.addEventListener("focus", () => { session.focus += 1; });
   window.addEventListener("blur", () => { session.blur += 1; });
   window.addEventListener("scroll", () => { session.scroll += 1; }, { passive: true });
@@ -33,6 +34,14 @@ function setupTelemetry() {
     if (e.pointerType === "touch" || e.pointerType === "pen") session.hasTouch = true;
     if (typeof e.pressure === "number" && e.pressure > session.maxPressure) {
       session.maxPressure = e.pressure;
+    }
+    if (session.move % 3 === 0) {
+      session.moveTrail.push({
+        x: Math.round(e.clientX),
+        y: Math.round(e.clientY),
+        t: Math.round(Date.now() - session.pageLoad),
+      });
+      if (session.moveTrail.length > 64) session.moveTrail.shift();
     }
   }, { passive: true });
   if (navigator.maxTouchPoints > 0 || "ontouchstart" in window) session.hasTouch = true;
@@ -46,8 +55,113 @@ function setupTelemetry() {
   });
 }
 
-function telemetrySnapshot() {
+function canvasHash() {
+  try {
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+    ctx.textBaseline = "top";
+    ctx.font = "14px Arial";
+    ctx.fillStyle = "#069";
+    ctx.fillText("redaptcha-\u{1F512}", 2, 2);
+    return c.toDataURL().slice(-64);
+  } catch {
+    return null;
+  }
+}
+
+function webglInfo() {
+  try {
+    const gl =
+      document.createElement("canvas").getContext("webgl") ||
+      document.createElement("canvas").getContext("experimental-webgl");
+    if (!gl) return { hash: null, vendor: null };
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    return {
+      hash: String(gl.getParameter(gl.VERSION) || "").slice(-32),
+      vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null,
+    };
+  } catch {
+    return { hash: null, vendor: null };
+  }
+}
+
+function perfJitter(n = 16) {
+  const out = [];
+  let prev = performance.now();
+  for (let i = 0; i < n; i++) {
+    const now = performance.now();
+    out.push(now - prev);
+    prev = now;
+  }
+  return out;
+}
+
+function rotl32(v, by) {
+  const b = by & 31;
+  if (b === 0) return v >>> 0;
+  return ((v << b) | (v >>> (32 - b))) >>> 0;
+}
+
+function runInstrProgram(program) {
+  let acc = program.seed >>> 0;
+  for (const step of program.ops) {
+    const k = step.k >>> 0;
+    switch (step.op) {
+      case "xor":
+        acc = (acc ^ k) >>> 0;
+        break;
+      case "add":
+        acc = (acc + k) >>> 0;
+        break;
+      case "mul":
+        acc = Math.imul(acc, k | 1) >>> 0;
+        break;
+      case "and": {
+        const r = (acc & k) >>> 0;
+        acc = r === 0 ? (acc + k) >>> 0 : r;
+        break;
+      }
+      case "or":
+        acc = (acc | k) >>> 0;
+        break;
+      case "rotl":
+        acc = rotl32(acc, k);
+        break;
+      case "dom": {
+        const n = (k % 24) + 8;
+        const host = document.createElement("div");
+        host.style.display = "none";
+        document.body.appendChild(host);
+        let v = acc >>> 0;
+        for (let i = 0; i < n; i++) {
+          const node = document.createElement("span");
+          node.setAttribute("data-v", String(i));
+          host.appendChild(node);
+          const read = parseInt(node.getAttribute("data-v"), 10) >>> 0;
+          v = (v + Math.imul(read, 2654435761)) >>> 0;
+          v = (v ^ rotl32(v, 7)) >>> 0;
+        }
+        host.remove();
+        v = (v ^ n) >>> 0;
+        acc = v >>> 0;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return acc >>> 0;
+}
+
+function telemetrySnapshot(nonce) {
   const dpr = window.devicePixelRatio || 1;
+  const wg = webglInfo();
+  let tzName = null;
+  try {
+    tzName = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    tzName = null;
+  }
   return {
     page_load_to_first_move_ms: session.firstMove,
     focus_events: session.focus,
@@ -65,6 +179,18 @@ function telemetrySnapshot() {
     device_pixel_ratio: dpr,
     webdriver: navigator.webdriver === true,
     hidden_time_ms: session.hiddenMs,
+    canvas_hash: canvasHash(),
+    webgl_hash: wg.hash,
+    webgl_vendor: wg.vendor,
+    timezone_offset_min: -new Date().getTimezoneOffset(),
+    timezone_name: tzName,
+    language: navigator.language || null,
+    platform: navigator.platform || null,
+    user_agent: navigator.userAgent || null,
+    hardware_concurrency: navigator.hardwareConcurrency || 0,
+    device_memory: navigator.deviceMemory || null,
+    perf_jitter: perfJitter(),
+    nonce_echo: nonce || null,
   };
 }
 
@@ -114,8 +240,11 @@ async function unlockContent(token) {
   }
 }
 
-function createCaptcha(card) {
-  const CAPTCHA_KIND = card.dataset.kind;
+export function createCaptcha(card, opts = {}) {
+  const SERVER_URL = opts.server ?? SERVER;
+  const SITE_KEY_W = opts.siteKey ?? SITE_KEY;
+  let CAPTCHA_KIND = card.dataset.kind;
+  let fallbackKind = null;
   const canvas = card.querySelector('[data-role="canvas"]');
   const ctx = canvas.getContext("2d");
   const statusEl = card.querySelector('[data-role="status"]');
@@ -124,9 +253,12 @@ function createCaptcha(card) {
   const panel = card.querySelector('[data-role="panel"]');
   const timerBar = card.querySelector('[data-role="timer"]');
   const progressEl = card.querySelector('[data-role="progress"]');
-
+  const CORE_R = 7;
+  const CORE_LUM_THRESHOLD = 175;
   let state = "idle";
   let challenge = null;
+  let passiveIssuedAt = 0;
+  let instrResult = null;
   let deadline = 0;
   let worker = null;
   let vdfProgress = 0;
@@ -154,12 +286,17 @@ function createCaptcha(card) {
   let sliderRound = 0;
   let sliderRounds = SLIDER_ROUNDS;
   let sliderDropped = false;
+  let selX = -1;
+  let selY = -1;
+  let selT = 0;
+  let confirmReady = false;
   let rafID = 0;
 
   function setUi() {
     captchaEl.classList.toggle("is-loading", state === "vdf");
     captchaEl.classList.toggle("is-success", state === "success");
     captchaEl.classList.toggle("is-error", state === "failed");
+    card.classList.toggle("is-stepup", CAPTCHA_KIND !== card.dataset.kind);
     panel.classList.toggle("is-open", state === "active" || state === "vdf");
     checkbox.disabled = state !== "idle" && state !== "success" && state !== "failed";
   }
@@ -168,8 +305,10 @@ function createCaptcha(card) {
     return frameCount * frameDt;
   }
 
-  const CORE_R = 7;
-  const CORE_LUM_THRESHOLD = 175;
+  function confirmBtn() {
+    const w = 90, h = 28;
+    return { x: W - w - 8, y: H - h - 8, w, h };
+  }
 
   function isBallPixel(cx, cy) {
     const scan = CORE_R + (inputType === "touch" ? 5 : 0);
@@ -215,10 +354,36 @@ function createCaptcha(card) {
       const bg = panelStrips[0];
       if (bg) ctx.drawImage(bg, 0, 0, W, H);
       if (pieceImg && sliderHint) {
-        const flashing = now < flashUntil;
-        ctx.globalAlpha = flashing ? 1 : 0.95;
+        ctx.save();
+        ctx.shadowColor = "rgba(0,0,0,0.55)";
+        ctx.shadowBlur = 10;
         ctx.drawImage(pieceImg, pieceX, pieceY, sliderHint.piece_w, sliderHint.piece_h);
-        ctx.globalAlpha = 1;
+        ctx.restore();
+        ctx.strokeStyle = "rgba(237,255,253,0.9)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(pieceX - 1, pieceY - 1, sliderHint.piece_w + 2, sliderHint.piece_h + 2);
+      }
+      if (selX >= 0) {
+        ctx.strokeStyle = now < flashUntil ? "#7CFFB2" : "#22d3ee";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(selX, selY, 30, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (confirmReady) {
+        const b = confirmBtn();
+        ctx.fillStyle = "#1697f9";
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = "#edfffd";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 14px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Confirm", b.x + b.w / 2, b.y + b.h / 2);
+        ctx.textAlign = "start";
+        ctx.textBaseline = "alphabetic";
       }
       return;
     }
@@ -280,14 +445,59 @@ function createCaptcha(card) {
     }
   }
 
+  async function startPassive() {
+    statusEl.textContent = "Verifying…";
+    state = "vdf";
+    setUi();
+    try {
+      const res = await fetch(`${SERVER_URL}/challenge/${CAPTCHA_KIND}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site_key: SITE_KEY_W, hostname: location.hostname }),
+      });
+      if (!res.ok) {
+        statusEl.textContent = `Server error ${res.status}`;
+        state = "idle"; setUi(); return;
+      }
+      challenge = await res.json();
+      passiveIssuedAt = Date.now();
+      if (!challenge || !challenge.modulus_hex || !challenge.seed_hex) {
+        statusEl.textContent = "Bad challenge from server";
+        state = "idle"; setUi(); return;
+      }
+    } catch {
+      statusEl.textContent = "Could not reach server";
+      state = "idle"; setUi(); return;
+    }
+    clicks = [];
+    trail = session.moveTrail.slice();
+    inputType = "mouse";
+    instrResult = null;
+    if (challenge.instr) {
+      try {
+        instrResult = runInstrProgram(JSON.parse(challenge.instr));
+      } catch {
+        instrResult = null;
+      }
+    }
+    puzzleSolved();
+  }
   async function startChallenge() {
+    if (fallbackKind) {
+      CAPTCHA_KIND = fallbackKind;
+      fallbackKind = null;
+    }
+    if (CAPTCHA_KIND === "three") {
+      await startPassive();
+      return;
+    }
     statusEl.textContent = "Fetching challenge…";
     setUi();
     try {
-      const res = await fetch(`${SERVER}/challenge/${CAPTCHA_KIND}`, {
+      const res = await fetch(`${SERVER_URL}/challenge/${CAPTCHA_KIND}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ site_key: SITE_KEY, hostname: location.hostname }),
+        body: JSON.stringify({ site_key: SITE_KEY_W, hostname: location.hostname }),
       });
       if (!res.ok) {
         statusEl.textContent = `Server error ${res.status}`;
@@ -340,9 +550,12 @@ function createCaptcha(card) {
       pieceY = sliderHint.start_y;
       dragging = false;
       sliderDropped = false;
-      statusEl.textContent = "Drag the piece into the gap";
+      selX = -1;
+      selY = -1;
+      confirmReady = false;
+      statusEl.textContent = "Click the hole that fits the piece";
     } else {
-      statusEl.textContent = "Click a ball with a bright center";
+      statusEl.textContent = "Click a ball with the color shown";
     }
     deadline = Date.now() + TIME_LIMIT;
     setProgress();
@@ -359,7 +572,7 @@ function createCaptcha(card) {
       puzzleSolved();
       return;
     }
-    statusEl.textContent = "Click a ball with a bright center";
+    statusEl.textContent = "Click a ball with the color shown";
   }
 
   function puzzleSolved() {
@@ -391,9 +604,17 @@ function createCaptcha(card) {
   }
 
   async function submitSolution(outputHex, proofHex) {
+    if (challenge && challenge.kind === "three" && passiveIssuedAt) {
+      const elapsed = Date.now() - passiveIssuedAt;
+      const remaining = 9000 - elapsed;
+      if (remaining > 0) {
+        statusEl.textContent = "Finishing up…";
+        await new Promise((r) => setTimeout(r, remaining));
+      }
+    }
     statusEl.textContent = "Submitting…";
     try {
-      const res = await fetch(`${SERVER}/verify`, {
+      const res = await fetch(`${SERVER_URL}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -404,7 +625,8 @@ function createCaptcha(card) {
           trail,
           sig: challenge.sig,
           input_type: inputType,
-          telemetry: telemetrySnapshot(),
+          instr_result: instrResult,
+          telemetry: telemetrySnapshot(challenge.nonce),
         }),
       });
       const result = await res.json();
@@ -412,10 +634,21 @@ function createCaptcha(card) {
         state = "success";
         statusEl.textContent = "Success!";
         setUi();
-        unlockContent(result.token);
+        if (opts.onSolve) {
+          opts.onSolve(result.token);  
+        } else {
+          unlockContent(result.token); 
+        }
         return;
       } else if (result.ok && !result.token) {
         if (worker) { worker.terminate(); worker = null; }
+        if (result.need_challenge) {
+          fallbackKind = result.need_challenge;
+          statusEl.textContent = "One more step…";
+          setUi();
+          await startChallenge();
+          return;
+        }
         const m = /round\s+(\d+)\s+of\s+(\d+)/i.exec(result.message || "");
         if (m) {
           sliderRound = Number(m[1]);
@@ -465,6 +698,9 @@ function createCaptcha(card) {
     sliderRound = 0;
     sliderRounds = SLIDER_ROUNDS;
     sliderDropped = false; 
+    selX = -1;
+    selY = -1;
+    confirmReady = false;
     if (progressEl) progressEl.textContent = "";
     timerBar.style.opacity = "0";
     statusEl.textContent = "Verify you are human";
@@ -488,7 +724,7 @@ function createCaptcha(card) {
     const cx = (e.clientX - rect.left) * (W / rect.width);
     const cy = (e.clientY - rect.top) * (H / rect.height);
     if (!isBallPixel(cx, cy)) {
-      statusEl.textContent = "Missed - click a ball with a bright center";
+      statusEl.textContent = "Missed - click a ball with the color shown";
       return;
     }
     const t = Date.now() - puzzleStart;
@@ -512,7 +748,7 @@ function createCaptcha(card) {
     if (trail.length > 400) trail.shift();
     if (e.pointerType === "touch" && Date.now() >= flashUntil) {
       if (!isBallPixel(cx, cy)) {
-        statusEl.textContent = "Missed - tap a ball with a bright center";
+        statusEl.textContent = "Missed - tap a ball with the color shown";
         return;
       }
       touchClickPending = true;
@@ -536,50 +772,50 @@ function createCaptcha(card) {
     if (trail.length > 400) trail.shift();
   });
   canvas.addEventListener("pointerup", () => { pointerDown = false; });
-  canvas.addEventListener("pointercancel", () => { pointerDown = false; });
-  canvas.addEventListener("pointerdown", (e) => {
-    if (state !== "active" || !isSlider || !sliderHint) return;
-    if (sliderDropped || dragging) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (W / rect.width);
-    const y = (e.clientY - rect.top) * (H / rect.height);
-    if (
-      x >= pieceX && x <= pieceX + sliderHint.piece_w &&
-      y >= pieceY && y <= pieceY + sliderHint.piece_h
-    ) {
-      dragging = true;
-      inputType = e.pointerType || "mouse";
-      dragDX = x - pieceX;
-      dragDY = y - pieceY;
-      dragStartT = Date.now() - puzzleStart;
-      clicks = [{ x: Math.round(pieceX), y: Math.round(pieceY), t: Math.round(dragStartT) }];
-      try { canvas.setPointerCapture(e.pointerId); } catch {}
-    }
-  });
+  canvas.addEventListener("pointercancel", () => { pointerDown = false; dragging = false; });
   canvas.addEventListener("pointermove", (e) => {
-    if (state !== "active" || !isSlider || !dragging || !sliderHint) return;
+    if (state !== "active" || !isSlider) return;
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) * (W / rect.width);
     const y = (e.clientY - rect.top) * (H / rect.height);
-    pieceX = Math.max(0, Math.min(W - sliderHint.piece_w, x - dragDX));
-    pieceY = Math.max(0, Math.min(H - sliderHint.piece_h, y - dragDY));
+    inputType = e.pointerType || inputType;
     trail.push({ x: Math.round(x), y: Math.round(y), t: Math.round(Date.now() - puzzleStart) });
     if (trail.length > 400) trail.shift();
   });
-  canvas.addEventListener("pointerup", () => {
-    if (state !== "active" || !isSlider || !dragging || !sliderHint) return;
-    dragging = false;
-    sliderDropped = true;
+  canvas.addEventListener("pointerdown", (e) => {
+    if (state !== "active" || !isSlider || !sliderHint) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W / rect.width);
+    const y = (e.clientY - rect.top) * (H / rect.height);
+    inputType = e.pointerType || "mouse";
     const t = Date.now() - puzzleStart;
-    clicks.push({ x: Math.round(pieceX), y: Math.round(pieceY), t: Math.round(t) });
-    flashUntil = Date.now() + 350;
-    statusEl.textContent = "Checking…";
-    setTimeout(puzzleSolved, 360);
+    trail.push({ x: Math.round(x), y: Math.round(y), t: Math.round(t) });
+    if (trail.length > 400) trail.shift();
+    if (confirmReady) {
+      const b = confirmBtn();
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        clicks = [
+          { x: Math.round(selX), y: Math.round(selY), t: Math.round(selT) },
+          { x: Math.round(x), y: Math.round(y), t: Math.round(t) },
+        ];
+        flashUntil = Date.now() + 350;
+        statusEl.textContent = "Checking…";
+        setTimeout(puzzleSolved, 360);
+        return;
+      }
+    }
+    if (y > H - 44 && x > W - 100) return;
+    selX = x;
+    selY = y;
+    selT = t;
+    confirmReady = true;
+    flashUntil = Date.now() + 250;
+    statusEl.textContent = "Click Confirm to submit";
   });
   reset();
   draw(Date.now(), 0);
 }
 
-document.querySelectorAll(".captcha-card").forEach(createCaptcha);
+document.querySelectorAll(".captcha-card").forEach((c) => createCaptcha(c));
 setupCarousel();
 setupTelemetry();

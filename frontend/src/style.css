@@ -183,6 +183,7 @@ canvas {
   display: block;
   width: 100%;
   height: auto;
+  touch-action: none;
 }
 
 .timer-wrap {
@@ -291,4 +292,12 @@ canvas {
 .carousel-btn:disabled {
   opacity: 0.3;
   cursor: default;
+}
+
+.captcha-card[data-kind="three"] .puzzle-panel {
+  display: none;
+}
+
+.captcha-card[data-kind="three"].is-stepup .puzzle-panel {
+  display: block;
 }

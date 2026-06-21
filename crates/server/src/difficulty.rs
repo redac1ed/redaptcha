@@ -25,6 +25,16 @@ pub const PURSUIT_MIN_POINTS: usize = 4;
 pub const PURSUIT_LANDING_MAX_PX: f64 = 60.0;
 pub const PURSUIT_MIN_PATH_PX: f64 = 12.0;
 pub const MIN_HUMAN_MOVES: u32 = 8;
+pub const TRACK_WINDOW_MS: f64 = 420.0;
+pub const TRACK_MIN_POINTS: usize = 5;
+pub const TRACK_MAX_MEAN_DEV_PX: f64 = 34.0;
+pub const TRACK_MIN_CORR: f64 = 0.15;
+pub const PASSIVE_DIFFICULTY_MIN: u64 = 150_000;
+pub const PASSIVE_DIFFICULTY_MAX: u64 = 600_000;
+pub const PASSIVE_PASS_THRESHOLD: f64 = 0.30;
+pub const PASSIVE_MIN_TRAIL_POINTS: usize = 14;
+pub const PASSIVE_MIN_MOVE_EVENTS: u32 = 24;
+pub const PASSIVE_MIN_SOLVE_SECS: u64 = 8;
 
 pub struct GlobalLimiter {
     pub count: u32,
@@ -58,6 +68,7 @@ pub struct TrustInputs {
     pub grade_score: f64,
     pub suspicion: f64,
     pub fail_ratio: f64,
+    pub regularity_weight: f64,
     pub page_load_to_first_move_ms: Option<f64>,
     pub focus_events: u32,
     pub blur_events: u32,
@@ -154,7 +165,8 @@ impl ClientProfile {
     }
     pub fn record_success(&mut self) {
         self.successes = self.successes.saturating_add(1);
-        self.suspicion = (self.suspicion - 0.1).max(0.0);
+        self.suspicion = (self.suspicion - 0.5).max(0.0);
+        self.failures = self.failures.saturating_sub(2);
     }
     pub fn flag_anomaly(&mut self, weight: f64) {
         self.suspicion = (self.suspicion + weight).clamp(0.0, 1.0);
@@ -180,6 +192,20 @@ pub fn difficulty_for(profile: &ClientProfile) -> u64 {
     let span = (DIFFICULTY_MAX - DIFFICULTY_MIN) as f64;
     let raw = DIFFICULTY_MIN as f64 + span * blended;
     round_to_step(raw as u64, 500).clamp(DIFFICULTY_MIN, DIFFICULTY_MAX)
+}
+
+pub fn passive_difficulty_for(profile: &ClientProfile) -> u64 {
+    let rate_frac = (profile.count as f64 / MAX_CHALLENGES_PER_WINDOW as f64).clamp(0.0, 1.0);
+    let rate_curve = rate_frac * rate_frac;
+    let fail_signal = if profile.successes + profile.failures == 0 {
+        0.0
+    } else {
+        profile.failures as f64 / (profile.successes + profile.failures) as f64
+    };
+    let blended = (0.45 * rate_curve + 0.35 * profile.suspicion + 0.20 * fail_signal).clamp(0.0, 1.0);
+    let span = (PASSIVE_DIFFICULTY_MAX - PASSIVE_DIFFICULTY_MIN) as f64;
+    let raw = PASSIVE_DIFFICULTY_MIN as f64 + span * blended;
+    round_to_step(raw as u64, 10_000).clamp(PASSIVE_DIFFICULTY_MIN, PASSIVE_DIFFICULTY_MAX)
 }
 
 fn round_to_step(value: u64, step: u64) -> u64 {
@@ -236,6 +262,58 @@ pub fn trail_stats(trail: &[(f64, f64, f64)]) -> TrailStats {
         max_step,
         span,
     }
+}
+
+fn cv(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 1.0;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    if mean.abs() < 1e-6 {
+        return 0.0;
+    }
+    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    var.sqrt() / mean.abs()
+}
+
+pub fn trail_regularity(trail: &[(f64, f64, f64)], is_touch: bool) -> f64 {
+    if trail.len() < MIN_TRAIL_POINTS {
+        return 0.0;
+    }
+    let mut steps = Vec::with_capacity(trail.len());
+    let mut dts = Vec::with_capacity(trail.len());
+    let mut turns = Vec::with_capacity(trail.len());
+    for w in trail.windows(2) {
+        let d = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+        steps.push(d);
+        dts.push((w[1].2 - w[0].2).max(0.0));
+    }
+    for w in trail.windows(3) {
+        let ax = w[1].0 - w[0].0;
+        let ay = w[1].1 - w[0].1;
+        let bx = w[2].0 - w[1].0;
+        let by = w[2].1 - w[1].1;
+        let am = (ax * ax + ay * ay).sqrt();
+        let bm = (bx * bx + by * by).sqrt();
+        if am > 0.5 && bm > 0.5 {
+            turns.push((ax * bx + ay * by) / (am * bm));
+        }
+    }
+    let step_cv = cv(&steps);
+    let dt_cv = cv(&dts);
+    let turn_cv = cv(&turns);
+    let mut penalty = 0.0;
+    let step_floor = if is_touch { 0.10 } else { 0.18 };
+    if step_cv < step_floor {
+        penalty += (step_floor - step_cv) / step_floor * 0.5;
+    }
+    if dt_cv < 0.06 {
+        penalty += (0.06 - dt_cv) / 0.06 * 0.3;
+    }
+    if !turns.is_empty() && turn_cv < 0.02 {
+        penalty += 0.2;
+    }
+    penalty.clamp(0.0, 1.0)
 }
 
 pub fn grade_trail(trail: &[(f64, f64, f64)], is_touch: bool) -> Result<f64, &'static str> {
@@ -298,13 +376,84 @@ pub fn pursuit_coherent(trail: &[(f64, f64, f64)], clicks: &[(f64, f64, f64)]) -
     Ok(())
 }
 
-pub fn trust_score(t: &TrustInputs) -> f64 {
+pub fn track_coherent<F>(
+    trail: &[(f64, f64, f64)],
+    clicks: &[(f64, f64, f64)],
+    target_at: F,
+) -> Result<(), &'static str>
+where
+    F: Fn(usize, f64) -> Option<(f64, f64)>,
+{
+    if clicks.is_empty() || trail.is_empty() {
+        return Ok(());
+    }
+    for (ci, c) in clicks.iter().enumerate() {
+        let lead: Vec<&(f64, f64, f64)> = trail
+            .iter()
+            .filter(|p| p.2 <= c.2 && p.2 >= c.2 - TRACK_WINDOW_MS)
+            .collect();
+        if lead.len() < TRACK_MIN_POINTS {
+            continue;
+        }
+        let span = (lead.last().unwrap().2 - lead.first().unwrap().2).max(1.0);
+        let mut dev_sum = 0.0;
+        let mut dev_n = 0.0;
+        for p in &lead {
+            let frac = (p.2 - lead.first().unwrap().2) / span;
+            if frac < 0.4 {
+                continue;
+            }
+            if let Some((tx, ty)) = target_at(ci, p.2) {
+                dev_sum += ((p.0 - tx).powi(2) + (p.1 - ty).powi(2)).sqrt();
+                dev_n += 1.0;
+            }
+        }
+        if dev_n >= 3.0 {
+            let mean_dev = dev_sum / dev_n;
+            if mean_dev > TRACK_MAX_MEAN_DEV_PX {
+                return Err("cursor not tracking target");
+            }
+        }
+        let mut dot = 0.0;
+        let mut paired = 0;
+        for w in lead.windows(2) {
+            let cvx = w[1].0 - w[0].0;
+            let cvy = w[1].1 - w[0].1;
+            let cmag = (cvx * cvx + cvy * cvy).sqrt();
+            if cmag < 0.5 {
+                continue;
+            }
+            let (a, b) = match (target_at(ci, w[0].2), target_at(ci, w[1].2)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => continue,
+            };
+            let tvx = b.0 - a.0;
+            let tvy = b.1 - a.1;
+            let tmag = (tvx * tvx + tvy * tvy).sqrt();
+            if tmag < 0.5 {
+                continue;
+            }
+            dot += (cvx * tvx + cvy * tvy) / (cmag * tmag);
+            paired += 1;
+        }
+        if paired >= 3 {
+            let corr = dot / paired as f64;
+            if corr < TRACK_MIN_CORR {
+                return Err("pursuit direction mismatch");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn trust_score(t: &TrustInputs, trail_points: usize) -> f64 {
     let mut score = 1.0;
     score -= t.suspicion * 0.30;
     score -= t.fail_ratio * 0.20;
     score -= t.trail_weight * 0.15;
     score -= t.timing_weight * 0.15;
     score += (t.grade_score - 0.5) * 0.20;
+    score -= t.regularity_weight * 0.20;
     match t.page_load_to_first_move_ms {
         Some(ms) if ms < 80.0 => score -= 0.20,
         Some(ms) if ms < 200.0 => score -= 0.10,
@@ -334,7 +483,78 @@ pub fn trust_score(t: &TrustInputs) -> f64 {
     } else if t.max_pressure <= 0.0 {
         score -= 0.03;
     }
-    score.clamp(0.0, 1.0)
+    (score.clamp(0.0, 1.0) * consistency_gate(t, trail_points)).clamp(0.0, 1.0)
+}
+
+pub fn consistency_gate(t: &TrustInputs, trail_points: usize) -> f64 {
+    let mut mult: f64 = 1.0;
+    let is_touch = t.input_type.eq_ignore_ascii_case("touch")
+        || t.input_type.eq_ignore_ascii_case("pen")
+        || t.has_touch;
+
+    if t.webdriver {
+        mult *= 0.05;
+    }
+    if t.move_events >= 20 && trail_points < 4 {
+        mult *= 0.15;
+    }
+    if trail_points >= 6 && t.move_events == 0 {
+        mult *= 0.15;
+    }
+    match t.page_load_to_first_move_ms {
+        Some(ms) if ms < 0.0 => mult *= 0.10,
+        _ => {}
+    }
+    if t.focus_events == 0
+        && t.blur_events == 0
+        && t.scroll_events == 0
+        && t.key_events == 0
+        && !is_touch
+        && t.move_events < MIN_HUMAN_MOVES
+    {
+        mult *= 0.30;
+    }
+    mult.clamp(0.0, 1.0)
+}
+
+pub fn attestation_consistent(t: &core_types::SessionTelemetry) -> f64 {
+    let mut mult: f64 = 1.0;
+    if let (Some(sw), Some(vw)) = (t.screen_w, t.viewport_w) {
+        if (vw as f64) > (sw as f64) * t.device_pixel_ratio + 4.0 {
+            mult *= 0.4;
+        }
+    }
+    if let (Some(off), Some(name)) = (t.timezone_offset_min, &t.timezone_name) {
+        if name.is_empty() || (off == 0 && name != "UTC" && !name.contains("GMT")) {
+            mult *= 0.7;
+        }
+    }
+    if let Some(ua) = &t.user_agent {
+        let ua_mobile = ua.contains("Mobile") || ua.contains("Android") || ua.contains("iPhone");
+        if ua_mobile != t.has_touch {
+            mult *= 0.5;
+        }
+    }
+    if t.perf_jitter.len() >= 8 {
+        let mean = t.perf_jitter.iter().sum::<f64>() / t.perf_jitter.len() as f64;
+        let var = t.perf_jitter.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+            / t.perf_jitter.len() as f64;
+        if var < 1e-9 {
+            mult *= 0.3; 
+        }
+    } else {
+        mult *= 0.6; 
+    }
+    if t.canvas_hash.as_deref().unwrap_or("").is_empty()
+        || t.webgl_hash.as_deref().unwrap_or("").is_empty() {
+        mult *= 0.5;
+    }
+    if let Some(hc) = t.hardware_concurrency {
+        if hc == 0 || hc > 256 {
+            mult *= 0.6;
+        }
+    }
+    mult.clamp(0.0, 1.0)
 }
 
 pub fn trust_decision(score: f64) -> TrustDecision {
@@ -344,6 +564,34 @@ pub fn trust_decision(score: f64) -> TrustDecision {
         TrustDecision::StepUp
     } else {
         TrustDecision::Fail
+    }
+}
+
+pub fn nonce_echo_ok(t: &core_types::SessionTelemetry, expected_nonce: &str) -> bool {
+    t.nonce_echo.as_deref() == Some(expected_nonce)
+}
+
+#[allow(dead_code)]
+pub fn passive_interaction_genuine(t: &TrustInputs, trail_points: usize) -> bool {
+    if t.has_touch {
+        return trail_points >= TOUCH_MIN_TRAIL_POINTS && t.move_events >= MIN_HUMAN_MOVES;
+    }
+    if trail_points < PASSIVE_MIN_TRAIL_POINTS {
+        return false;
+    }
+    if t.move_events < PASSIVE_MIN_MOVE_EVENTS {
+        return false;
+    }
+    let distinct_event_kinds = (t.focus_events > 0) as u32
+        + (t.blur_events > 0) as u32
+        + (t.scroll_events > 0) as u32
+        + (t.key_events > 0) as u32;
+    if distinct_event_kinds < 2 {
+        return false;
+    }
+    match t.page_load_to_first_move_ms {
+        Some(ms) if ms >= MIN_REACTION_MS => true,
+        _ => false,
     }
 }
 
@@ -373,6 +621,7 @@ mod tests {
             grade_score: 1.0,
             suspicion: 0.0,
             fail_ratio: 0.0,
+            regularity_weight: 0.0,
             page_load_to_first_move_ms: Some(600.0),
             focus_events: 2,
             blur_events: 1,
@@ -472,7 +721,7 @@ mod tests {
     }
     #[test]
     fn clean_human_passes_trust() {
-        let s = trust_score(&clean_inputs());
+        let s = trust_score(&clean_inputs(), 40);
         assert!(s >= TRUST_PASS_THRESHOLD, "score was {s}");
         assert_eq!(trust_decision(s), TrustDecision::Pass);
     }
@@ -480,8 +729,8 @@ mod tests {
     fn webdriver_lowers_trust() {
         let mut t = clean_inputs();
         t.webdriver = true;
-        let s = trust_score(&t);
-        assert!(s < trust_score(&clean_inputs()));
+        let s = trust_score(&t, 40);
+        assert!(s < trust_score(&clean_inputs(), 40));
         assert!(is_headless(&t));
     }
     #[test]
@@ -514,7 +763,7 @@ mod tests {
         t.timing_weight = 1.0;
         t.grade_score = 0.0;
         t.webdriver = true;
-        let s = trust_score(&t);
+        let s = trust_score(&t, 40);
         assert!((0.0..=1.0).contains(&s));
     }
     #[test]
@@ -548,5 +797,63 @@ mod tests {
             (200.0, 150.0, 499.0),
         ];
         assert!(pursuit_coherent(&trail, &clicks).is_err());
+    }
+    #[test]
+    fn track_accepts_orbital_pursuit() {
+        let orbit = |t: f64| -> (f64, f64) {
+            let a = t / 100.0;
+            (160.0 + 40.0 * a.cos(), 120.0 + 40.0 * a.sin())
+        };
+        let click_t = 500.0;
+        let (cx, cy) = orbit(click_t);
+        let clicks = vec![(cx, cy, click_t)];
+        let mut trail = vec![];
+        for i in 0..14 {
+            let t = click_t - 420.0 + i as f64 * 32.0;
+            let (bx, by) = orbit(t);
+            trail.push((bx + 3.0, by - 2.0, t));
+        }
+        let target_at = |_ci: usize, t: f64| Some(orbit(t));
+        assert!(track_coherent(&trail, &clicks, target_at).is_ok());
+    }
+    #[test]
+    fn track_rejects_straight_line_to_point() {
+        let orbit = |t: f64| -> (f64, f64) {
+            let a = t / 100.0;
+            (160.0 + 40.0 * a.cos(), 120.0 + 40.0 * a.sin())
+        };
+        let click_t = 500.0;
+        let (cx, cy) = orbit(click_t);
+        let clicks = vec![(cx, cy, click_t)];
+        let mut trail = vec![];
+        let start = (cx - 120.0, cy - 90.0);
+        for i in 0..14 {
+            let f = i as f64 / 13.0;
+            let t = click_t - 420.0 + i as f64 * 32.0;
+            trail.push((start.0 + (cx - start.0) * f, start.1 + (cy - start.1) * f, t));
+        }
+        let target_at = |_ci: usize, t: f64| Some(orbit(t));
+        assert!(track_coherent(&trail, &clicks, target_at).is_err());
+    }
+    #[test]
+    fn regularity_flags_machine_smooth_trail() {
+        let mut trail = vec![];
+        for i in 0..30 {
+            trail.push((i as f64 * 4.0, i as f64 * 4.0, i as f64 * 16.0));
+        }
+        assert!(trail_regularity(&trail, false) > 0.3);
+    }
+    #[test]
+    fn regularity_accepts_jittery_human_trail() {
+        let jit = [1.3, -2.1, 0.7, 3.4, -1.8, 2.2, -0.6, 4.1, -3.2, 1.1];
+        let dtj = [38.0, 51.0, 29.0, 60.0, 42.0, 33.0, 55.0, 47.0, 31.0, 58.0];
+        let mut trail = vec![(0.0, 0.0, 0.0)];
+        let mut t = 0.0;
+        for i in 1..24 {
+            let j = jit[i % jit.len()];
+            t += dtj[i % dtj.len()];
+            trail.push((i as f64 * 5.0 + j, i as f64 * 3.0 - j, t));
+        }
+        assert!(trail_regularity(&trail, false) < 0.2);
     }
 }

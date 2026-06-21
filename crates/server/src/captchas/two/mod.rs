@@ -12,12 +12,15 @@ pub const EXPECTED_CLICKS: usize = 2;
 const PIECE: f64 = 52.0;
 const KNOB: f64 = 11.0;
 const BBOX: f64 = PIECE + KNOB * 2.0;
-const TOLERANCE: f64 = 16.0;
-const EDGE: f64 = 8.0;
-const MIN_DROP_TRAVEL: f64 = 10.0;
+const EDGE: f64 = 10.0;
+const HOLE_COUNT: usize = 4;
+const SELECT_TOLERANCE: f64 = BBOX * 0.6;
+const CONFIRM_MIN_GAP_MS: f64 = 120.0;
+const CONFIRM_MAX_GAP_MS: f64 = 14000.0;
 const MIN_TRAIL_POINTS: usize = 5;
-const MAX_TELEPORT_FRAC: f64 = 0.5;
-const APPROACH_FRAC: f64 = 0.6;
+const MOVE_MIN_PATH_PX: f64 = 24.0;
+const MAX_TELEPORT_FRAC: f64 = 0.7;
+const PASS_NEAR_PX: f64 = BBOX;
 
 pub struct Slider;
 
@@ -29,41 +32,57 @@ impl Captcha for Slider {
     fn puzzle_h(&self) -> f64 { PUZZLE_H as f64 }
     fn generate(&self, challenge_key: &[u8], challenge_id: &str) -> Rendered {
         let mut rng = derive_rng(challenge_key, challenge_id);
-        let (tx, ty) = target_pos(&mut rng);
-        let (sx, sy) = start_pos(&mut rng, tx, ty);
+        let layout = build_layout(&mut rng);
         let bg = render_background(&mut rng);
-        let mask = jigsaw_mask();
-        let board = render_board(&bg, &mask, tx, ty);
-        let piece = render_piece(&bg, &mask, tx, ty);
+        let answer = &layout.holes[layout.answer_idx];
+        let board = render_board(&bg, &layout);
+        let piece = render_piece(&bg, answer);
         Rendered {
             frames_b64: vec![encode(&board), encode(&piece)],
             slider: Some(SliderHint {
                 piece_w: BBOX,
                 piece_h: BBOX,
-                start_x: sx,
-                start_y: sy,
+                start_x: layout.piece_x,
+                start_y: layout.piece_y,
             }),
         }
     }
-    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[TrailPoint],) -> Result<(), &'static str> {
+    fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], _trail: &[TrailPoint]) -> Result<(), &'static str> {
         if clicks.len() != EXPECTED_CLICKS {
             return Err("wrong click count");
         }
         let mut rng = derive_rng(challenge_key, challenge_id);
-        let (tx, ty) = target_pos(&mut rng);
-        let grab = &clicks[0];
-        let drop = &clicks[1];
-        let travel = ((drop.x - grab.x).powi(2) + (drop.y - grab.y).powi(2)).sqrt();
-        if travel < MIN_DROP_TRAVEL {
-            return Err("piece barely moved");
+        let layout = build_layout(&mut rng);
+        let select = &clicks[0];
+        let confirm = &clicks[1];
+        let answer = &layout.holes[layout.answer_idx];
+        let (ax, ay) = hole_center(answer);
+        let dx = select.x - ax;
+        let dy = select.y - ay;
+        if (dx * dx + dy * dy).sqrt() > SELECT_TOLERANCE {
+            for (i, h) in layout.holes.iter().enumerate() {
+                if i == layout.answer_idx {
+                    continue;
+                }
+                let (cx, cy) = hole_center(h);
+                if ((select.x - cx).powi(2) + (select.y - cy).powi(2)).sqrt() <= SELECT_TOLERANCE {
+                    return Err("wrong shape selected");
+                }
+            }
+            return Err("no hole selected");
         }
-        let dx = drop.x - tx;
-        let dy = drop.y - ty;
-        if dx.abs() > TOLERANCE || dy.abs() > TOLERANCE {
-            return Err("piece not aligned");
+        let gap = confirm.t - select.t;
+        if gap < CONFIRM_MIN_GAP_MS || gap > CONFIRM_MAX_GAP_MS {
+            return Err("confirm timing implausible");
+        }
+        Ok(())
+    }
+    fn track(&self, _challenge_key: &[u8], _challenge_id: &str, clicks: &[Click], trail: &[TrailPoint]) -> Result<(), &'static str> {
+        if clicks.len() != EXPECTED_CLICKS {
+            return Err("wrong click count");
         }
         if trail.len() < MIN_TRAIL_POINTS {
-            return Err("no drag movement");
+            return Err("no pointer movement");
         }
         let mut path_len = 0.0;
         let mut max_step = 0.0;
@@ -74,28 +93,83 @@ impl Captcha for Slider {
                 max_step = d;
             }
         }
-        if path_len <= 0.0 {
-            return Err("no drag movement");
+        if path_len < MOVE_MIN_PATH_PX {
+            return Err("pointer barely moved");
         }
         if max_step / path_len > MAX_TELEPORT_FRAC {
             return Err("teleport detected");
         }
-        let off_x = trail[0].x - grab.x;
-        let off_y = trail[0].y - grab.y;
-        let start_dist = {
-            let p = &trail[0];
-            (((p.x - off_x) - tx).powi(2) + ((p.y - off_y) - ty).powi(2)).sqrt()
-        };
-        let end_dist = {
-            let p = trail.last().unwrap();
-            (((p.x - off_x) - tx).powi(2) + ((p.y - off_y) - ty).powi(2)).sqrt()
-        };
-        if start_dist > 0.0 && end_dist > start_dist * APPROACH_FRAC {
-            return Err("drag did not approach target");
+        let select = &clicks[0];
+        let mut min_dist = f64::INFINITY;
+        for p in trail {
+            let d = ((p.x - select.x).powi(2) + (p.y - select.y).powi(2)).sqrt();
+            if d < min_dist {
+                min_dist = d;
+            }
         }
-
+        if min_dist > PASS_NEAR_PX {
+            return Err("pointer did not approach selection")
+        }
         Ok(())
     }
+}
+
+struct Hole {
+    x: f64,
+    y: f64,
+    knobs: [i8; 4],
+}
+
+struct Layout {
+    holes: Vec<Hole>,
+    answer_idx: usize,
+    piece_x: f64,
+    piece_y: f64,
+}
+
+fn hole_center(h: &Hole) -> (f64, f64) {
+    (h.x + BBOX / 2.0, h.y + BBOX / 2.0)
+}
+
+fn build_layout(rng: &mut Rng) -> Layout {
+    let cols = 2usize;
+    let rows = 2usize;
+    let cell_w = (PUZZLE_W as f64 - EDGE * 2.0) / cols as f64;
+    let cell_h = (PUZZLE_H as f64 - EDGE * 2.0) / rows as f64;
+    let mut holes: Vec<Hole> = Vec::with_capacity(HOLE_COUNT);
+    let mut used: Vec<[i8; 4]> = Vec::new();
+    for i in 0..HOLE_COUNT {
+        let c = i % cols;
+        let r = i / cols;
+        let jx = rng.range(0.0, (cell_w - BBOX).max(0.0));
+        let jy = rng.range(0.0, (cell_h - BBOX).max(0.0));
+        let x = EDGE + c as f64 * cell_w + jx;
+        let y = EDGE + r as f64 * cell_h + jy;
+        let mut knobs = random_knobs(rng);
+        let mut guard = 0;
+        while used.iter().any(|k| *k == knobs) && guard < 32 {
+            knobs = random_knobs(rng);
+            guard += 1;
+        }
+        used.push(knobs);
+        holes.push(Hole { x, y, knobs });
+    }
+    let answer_idx = (rng.next() * HOLE_COUNT as f64) as usize % HOLE_COUNT;
+    let piece_x = rng.range(EDGE, PUZZLE_W as f64 - BBOX - EDGE);
+    let piece_y = rng.range(EDGE, PUZZLE_H as f64 - BBOX - EDGE);
+    Layout { holes, answer_idx, piece_x, piece_y }
+}
+
+fn random_knobs(rng: &mut Rng) -> [i8; 4] {
+    let mut k = [0i8; 4];
+    for s in k.iter_mut() {
+        let v = (rng.next() * 3.0) as i64;
+        *s = (v - 1) as i8;
+    }
+    if k == [0, 0, 0, 0] {
+        k[(rng.next() * 4.0) as usize % 4] = if rng.next() < 0.5 { 1 } else { -1 };
+    }
+    k
 }
 
 struct Rng(u64);
@@ -115,23 +189,6 @@ fn derive_rng(key: &[u8], challenge_id: &str) -> Rng {
     let mut seed = [0u8; 32];
     token::derive_bytes(key, &format!("slider|{challenge_id}"), &mut seed);
     Rng(u64::from_le_bytes(seed[..8].try_into().unwrap()) | 1)
-}
-
-fn target_pos(rng: &mut Rng) -> (f64, f64) {
-    let tx = rng.range(BBOX + EDGE, PUZZLE_W as f64 - BBOX - EDGE);
-    let ty = rng.range(EDGE, PUZZLE_H as f64 - BBOX - EDGE);
-    (tx, ty)
-}
-
-fn start_pos(rng: &mut Rng, tx: f64, ty: f64) -> (f64, f64) {
-    for _ in 0..40 {
-        let sx = rng.range(EDGE, PUZZLE_W as f64 - BBOX - EDGE);
-        let sy = rng.range(EDGE, PUZZLE_H as f64 - BBOX - EDGE);
-        if (sx - tx).abs() + (sy - ty).abs() > 70.0 {
-            return (sx, sy);
-        }
-    }
-    (EDGE, EDGE)
 }
 
 fn render_background(rng: &mut Rng) -> RgbaImage {
@@ -172,81 +229,112 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [u8; 3] {
     ]
 }
 
-fn jigsaw_mask() -> Vec<Vec<bool>> {
+fn shape_mask(knobs: &[i8; 4]) -> Vec<Vec<bool>> {
     let n = BBOX as usize;
     let mut m = vec![vec![false; n]; n];
     let l = KNOB;
-    let r = KNOB;
     let body_x0 = l;
-    let body_y0 = r;
+    let body_y0 = l;
     let body_x1 = l + PIECE;
-    let body_y1 = r + PIECE;
+    let body_y1 = l + PIECE;
     let kr = KNOB;
-    let cx_top = l + PIECE / 2.0;
-    let cy_top = r;
-    let cx_right = l + PIECE;
-    let cy_right = r + PIECE / 2.0;
+    let mids = [
+        (l + PIECE / 2.0, l),
+        (l + PIECE, l + PIECE / 2.0),
+        (l + PIECE / 2.0, l + PIECE),
+        (l, l + PIECE / 2.0),
+    ];
     for y in 0..n {
         for x in 0..n {
             let fx = x as f64 + 0.5;
             let fy = y as f64 + 0.5;
-            let in_body = fx >= body_x0 && fx <= body_x1 && fy >= body_y0 && fy <= body_y1;
-            let in_top = ((fx - cx_top).powi(2) + (fy - cy_top).powi(2)).sqrt() <= kr;
-            let in_right = ((fx - cx_right).powi(2) + (fy - cy_right).powi(2)).sqrt() <= kr;
-            let socket_left = ((fx - body_x0).powi(2) + (fy - (r + PIECE / 2.0)).powi(2)).sqrt() <= kr * 0.9;
-            m[y][x] = (in_body || in_top || in_right) && !socket_left;
+            let mut inside = fx >= body_x0 && fx <= body_x1 && fy >= body_y0 && fy <= body_y1;
+            for (i, &(mx, my)) in mids.iter().enumerate() {
+                let d = ((fx - mx).powi(2) + (fy - my).powi(2)).sqrt();
+                match knobs[i] {
+                    1 => {
+                        if d <= kr {
+                            inside = true;
+                        }
+                    }
+                    -1 => {
+                        if d <= kr * 0.92 {
+                            inside = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            m[y][x] = inside;
         }
     }
     m
 }
 
-fn render_board(bg: &RgbaImage, mask: &[Vec<bool>], tx: f64, ty: f64) -> RgbaImage {
-    let mut img = bg.clone();
+fn stamp_hole(img: &mut RgbaImage, hole: &Hole) {
+    let mask = shape_mask(&hole.knobs);
     let n = mask.len();
     for my in 0..n {
         for mx in 0..n {
             if !mask[my][mx] {
                 continue;
             }
-            let px = tx as i64 + mx as i64;
-            let py = ty as i64 + my as i64;
+            let px = hole.x as i64 + mx as i64;
+            let py = hole.y as i64 + my as i64;
             if px < 0 || py < 0 || px >= PUZZLE_W as i64 || py >= PUZZLE_H as i64 {
                 continue;
             }
             let p = img.get_pixel(px as u32, py as u32).0;
-            let edge = is_edge(mask, mx, my);
-            let v = if edge {
-                [235, 245, 255, 255]
-            } else {
-                [
-                    (p[0] as f64 * 0.32) as u8,
-                    (p[1] as f64 * 0.32) as u8,
-                    (p[2] as f64 * 0.34 + 18.0) as u8,
-                    255,
-                ]
-            };
+            let edge = is_edge(&mask, mx, my);
+            let f = if edge { 0.70 } else { 0.80 };
+            let v = [
+                (p[0] as f64 * f) as u8,
+                (p[1] as f64 * f) as u8,
+                (p[2] as f64 * f + 6.0).min(255.0) as u8,
+                255,
+            ];
             img.put_pixel(px as u32, py as u32, Rgba(v));
         }
+    }
+}
+
+fn render_board(bg: &RgbaImage, layout: &Layout) -> RgbaImage {
+    let mut img = bg.clone();
+    for h in &layout.holes {
+        stamp_hole(&mut img, h);
     }
     img
 }
 
-fn render_piece(bg: &RgbaImage, mask: &[Vec<bool>], tx: f64, ty: f64) -> RgbaImage {
+fn render_piece(bg: &RgbaImage, answer: &Hole) -> RgbaImage {
+    let mask = shape_mask(&answer.knobs);
     let n = mask.len();
     let mut img = RgbaImage::new(n as u32, n as u32);
+    let src_x = answer.x;
+    let src_y = answer.y;
     for my in 0..n {
         for mx in 0..n {
             if !mask[my][mx] {
                 img.put_pixel(mx as u32, my as u32, Rgba([0, 0, 0, 0]));
                 continue;
             }
-            let sx = (tx as i64 + mx as i64).clamp(0, PUZZLE_W as i64 - 1) as u32;
-            let sy = (ty as i64 + my as i64).clamp(0, PUZZLE_H as i64 - 1) as u32;
+            let sx = (src_x as i64 + mx as i64).clamp(0, PUZZLE_W as i64 - 1) as u32;
+            let sy = (src_y as i64 + my as i64).clamp(0, PUZZLE_H as i64 - 1) as u32;
             let p = bg.get_pixel(sx, sy).0;
-            let v = if is_edge(mask, mx, my) {
-                [245, 250, 255, 255]
+            let v = if is_edge(&mask, mx, my) {
+                [
+                    (p[0] as f64 * 0.55 + 90.0).min(255.0) as u8,
+                    (p[1] as f64 * 0.55 + 95.0).min(255.0) as u8,
+                    (p[2] as f64 * 0.55 + 100.0).min(255.0) as u8,
+                    255,
+                ]
             } else {
-                [p[0], p[1], p[2], 255]
+                [
+                    (p[0] as f64 * 0.85 + 26.0).min(255.0) as u8,
+                    (p[1] as f64 * 0.85 + 26.0).min(255.0) as u8,
+                    (p[2] as f64 * 0.85 + 30.0).min(255.0) as u8,
+                    255,
+                ]
             };
             img.put_pixel(mx as u32, my as u32, Rgba(v));
         }
@@ -288,37 +376,70 @@ mod tests {
     fn click(x: f64, y: f64, t: f64) -> Click {
         Click { x, y, t }
     }
-    fn target(key: &[u8], id: &str) -> (f64, f64) {
+    fn answer_center(key: &[u8], id: &str) -> (f64, f64) {
         let mut rng = derive_rng(key, id);
-        target_pos(&mut rng)
+        let layout = build_layout(&mut rng);
+        hole_center(&layout.holes[layout.answer_idx])
     }
-    fn straight_trail(sx: f64, sy: f64, ex: f64, ey: f64) -> Vec<TrailPoint> {
-        let n = 8;
+    fn wrong_center(key: &[u8], id: &str) -> (f64, f64) {
+        let mut rng = derive_rng(key, id);
+        let layout = build_layout(&mut rng);
+        let wi = (layout.answer_idx + 1) % layout.holes.len();
+        hole_center(&layout.holes[wi])
+    }
+    fn approach_trail(sx: f64, sy: f64, ex: f64, ey: f64) -> Vec<TrailPoint> {
+        let n = 14;
         (0..=n)
             .map(|i| {
                 let f = i as f64 / n as f64;
-                TrailPoint { x: sx + (ex - sx) * f, y: sy + (ey - sy) * f, t: f * 900.0 }
+                let e = f * f * (3.0 - 2.0 * f);
+                let bow = (f * std::f64::consts::PI).sin() * 6.0;
+                TrailPoint {
+                    x: sx + (ex - sx) * e + bow,
+                    y: sy + (ey - sy) * e - bow,
+                    t: (f * 1300.0).round(),
+                }
             })
             .collect()
     }
     #[test]
-    fn grades_aligned_drop() {
+    fn accepts_correct_hole_and_confirm() {
         let s = Slider;
         let key = b"test-key-0000000000000000000000";
         let id = "abc-123";
-        let (tx, ty) = target(key, id);
-        let clicks = vec![click(0.0, 0.0, 0.0), click(tx, ty, 900.0)];
-        let trail = straight_trail(0.0, 0.0, tx, ty);
+        let (ax, ay) = answer_center(key, id);
+        let clicks = vec![click(ax, ay, 1300.0), click(40.0, 220.0, 1600.0)];
+        let trail = approach_trail(20.0, 20.0, ax, ay);
         assert!(s.grade(key, id, &clicks, &trail).is_ok());
+        assert!(s.track(key, id, &clicks, &trail).is_ok());
     }
     #[test]
-    fn rejects_misaligned_drop() {
+    fn rejects_wrong_hole() {
         let s = Slider;
         let key = b"test-key-0000000000000000000000";
         let id = "abc-123";
-        let (tx, ty) = target(key, id);
-        let clicks = vec![click(0.0, 0.0, 0.0), click(tx + 40.0, ty, 900.0)];
-        let trail = straight_trail(0.0, 0.0, tx + 40.0, ty);
+        let (wx, wy) = wrong_center(key, id);
+        let clicks = vec![click(wx, wy, 1300.0), click(40.0, 220.0, 1600.0)];
+        let trail = approach_trail(20.0, 20.0, wx, wy);
+        assert!(s.grade(key, id, &clicks, &trail).is_err());
+    }
+    #[test]
+    fn rejects_empty_space() {
+        let s = Slider;
+        let key = b"test-key-0000000000000000000000";
+        let id = "abc-123";
+        let clicks = vec![click(2.0, 2.0, 1300.0), click(40.0, 220.0, 1600.0)];
+        let trail = approach_trail(20.0, 20.0, 2.0, 2.0);
+        assert!(s.grade(key, id, &clicks, &trail).is_err());
+    }
+    #[test]
+    fn rejects_instant_confirm() {
+        let s = Slider;
+        let key = b"test-key-0000000000000000000000";
+        let id = "abc-123";
+        let (ax, ay) = answer_center(key, id);
+        let clicks = vec![click(ax, ay, 1300.0), click(40.0, 220.0, 1310.0)];
+        let trail = approach_trail(20.0, 20.0, ax, ay);
         assert!(s.grade(key, id, &clicks, &trail).is_err());
     }
     #[test]
@@ -327,8 +448,35 @@ mod tests {
         let key = b"test-key-0000000000000000000000";
         let id = "abc-123";
         let clicks = vec![click(0.0, 0.0, 0.0)];
-        let trail = straight_trail(0.0, 0.0, 0.0, 0.0);
+        let trail = approach_trail(20.0, 20.0, 100.0, 100.0);
         assert!(s.grade(key, id, &clicks, &trail).is_err());
+    }
+    #[test]
+    fn track_rejects_teleport() {
+        let s = Slider;
+        let key = b"test-key-0000000000000000000000";
+        let id = "abc-123";
+        let (ax, ay) = answer_center(key, id);
+        let clicks = vec![click(ax, ay, 1300.0), click(40.0, 220.0, 1600.0)];
+        let trail = vec![
+            TrailPoint { x: 5.0, y: 5.0, t: 0.0 },
+            TrailPoint { x: 6.0, y: 6.0, t: 50.0 },
+            TrailPoint { x: 7.0, y: 6.0, t: 100.0 },
+            TrailPoint { x: 8.0, y: 7.0, t: 150.0 },
+            TrailPoint { x: ax, y: ay, t: 200.0 },
+        ];
+        assert!(s.track(key, id, &clicks, &trail).is_err());
+    }
+    #[test]
+    fn distinct_hole_shapes() {
+        let key = b"test-key-0000000000000000000000";
+        let mut rng = derive_rng(key, "shape-check");
+        let layout = build_layout(&mut rng);
+        for i in 0..layout.holes.len() {
+            for j in (i + 1)..layout.holes.len() {
+                assert_ne!(layout.holes[i].knobs, layout.holes[j].knobs);
+            }
+        }
     }
 }
 

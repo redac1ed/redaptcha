@@ -1,9 +1,11 @@
 mod captcha;
 mod captchas;
 mod difficulty;
+mod instr;
 mod setup;
 mod token;
 mod store;
+mod sitekeys;
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
@@ -46,6 +48,10 @@ struct Stored {
     born: Instant,
     created_ts: u64,
     issuer_ip: String,
+    nonce: String,
+    expires_at: u64,
+    expected_instr: Option<u32>,
+    site_key: String,
 }
 
 struct AppState {
@@ -57,6 +63,7 @@ struct AppState {
     challenge_key: Vec<u8>,
     redeem: store::RedeemStore,
     global: Mutex<GlobalLimiter>,
+    sites: sitekeys::SiteRegistry,
 }
 
 #[derive(serde::Deserialize)]
@@ -69,6 +76,13 @@ struct ContentResp {
     ok: bool,
     content: Option<String>,
 }
+
+#[derive(serde::Deserialize)]
+struct SiteVerifyReq { secret: String, response: String }
+
+#[derive(serde::Serialize)]
+struct SiteVerifyResp { success: bool, score: Option<f64>, hostname: Option<String> }
+
 
 pub fn is_production() -> bool {
     matches!(
@@ -144,6 +158,12 @@ async fn main() {
         }
     };
     let redeem = store::RedeemStore::from_env().await;
+    let sites = sitekeys::SiteRegistry::from_env();
+    if sites.is_empty() {
+        println!("site keys: open mode (no REDAPTCHA_SITES set; any site_key accepted)");
+    } else {
+        println!("site keys: enforced ({} configured)", sites.len());
+    }
     let state = Arc::new(AppState {
         store: Mutex::new(HashMap::new()),
         profiles: Mutex::new(HashMap::new()),
@@ -153,6 +173,7 @@ async fn main() {
         challenge_key: chal_key,
         redeem,
         global: Mutex::new(GlobalLimiter::new(Instant::now())),
+        sites,
     });
     let st = state.clone();
     tokio::spawn(async move {
@@ -183,6 +204,7 @@ async fn main() {
         .route("/challenge", post(issue_default))
         .route("/challenge/:kind", post(issue))
         .route("/verify", post(verify))
+        .route("/siteverify", post(siteverify))
         .route("/content", post(content));
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "frontend/dist".to_string());
     if std::path::Path::new(&static_dir).is_dir() {
@@ -215,6 +237,7 @@ fn err(message: &str) -> Json<VerifyResponse> {
         token: None,
         message: message.into(),
         score: None,
+        need_challenge: None, 
     })
 }
 
@@ -256,9 +279,19 @@ async fn issue(
     Path(kind): Path<String>,
     headers: HeaderMap,
     State(s): State<Arc<AppState>>,
-    Json(_req): Json<ChallengeRequest>,
+    Json(req): Json<ChallengeRequest>,
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
     let ip = client_ip(&addr, &headers);
+    if !s.sites.is_empty() {
+        let sk = req.site_key.trim();
+        if !s.sites.contains(sk) {
+            return Err(err("unknown site key"));
+        }
+        if !s.sites.host_allowed(sk, &req.hostname) {
+            return Err(err("site key not allowed for this host"));
+        }
+    }
+    let site_key = req.site_key.trim().to_string();
     let now = Instant::now();
     let puzzle = match captchas::by_kind(&kind) {
         Some(p) => p,
@@ -277,16 +310,31 @@ async fn issue(
         if !profile.register_request() {
             return Err(err("rate limited"));
         }
-        difficulty_for(profile)
+        if kind == "three" {
+            difficulty::passive_difficulty_for(profile)
+        } else {
+            difficulty_for(profile)
+        }
     };
     let id = Uuid::new_v4().to_string();
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     let seed_hex = hex::encode(seed);
+    let mut nonce_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = hex::encode(nonce_bytes);
     let rendered = puzzle.generate(&s.challenge_key, &id);
     let frames_b64 = rendered.frames_b64;
     let slider = rendered.slider;
     let created_ts = now_secs();
+    let expires_at = created_ts + TTL.as_secs();
+    let (instr_json, expected_instr) = if kind == "three" {
+        let program = instr::generate(&s.challenge_key, &id, &nonce);
+        let exp = instr::expected(&program);
+        (serde_json::to_string(&program).ok(), Some(exp))
+    } else {
+        (None, None)
+    };
     {
         let mut store = s.store.lock();
         store.insert(
@@ -298,10 +346,17 @@ async fn issue(
                 born: now,
                 created_ts,
                 issuer_ip: ip.clone(),
+                nonce: nonce.clone(),
+                expires_at,
+                expected_instr,
+                site_key: site_key.clone(),
             },
         );
     }
-    let canonical = format!("{}|{}|{}|{}|{}", id, kind, seed_hex, difficulty, ip);
+    let canonical = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        id, kind, seed_hex, difficulty, nonce, expires_at, ip
+    );
     let sig = token::sign_blob(&s.challenge_key, &canonical);
     Ok(Json(Challenge {
         id,
@@ -309,14 +364,34 @@ async fn issue(
         seed_hex,
         modulus_hex: s.modulus_hex.clone(),
         difficulty,
+        nonce,
+        expires_at,
         frames_b64,
         frame_count: FRAME_COUNT,
         frame_dt_ms: FRAME_DT_MS,
         puzzle_w: puzzle.puzzle_w(),
         puzzle_h: puzzle.puzzle_h(),
+        instr: instr_json, 
         sig,
         slider,
     }))
+}
+
+
+async fn siteverify(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<SiteVerifyReq>,
+) -> Json<SiteVerifyResp> {
+    let Some(claims) = token::verify(&s.token_key, &req.response) else {
+        return Json(SiteVerifyResp { success: false, score: None, hostname: None });
+    };
+    if !s.sites.is_empty() && !s.sites.secret_matches(&claims.site_key, &req.secret) {
+        return Json(SiteVerifyResp { success: false, score: None, hostname: None });
+    }
+    if !s.redeem.try_consume(&req.response).await {
+        return Json(SiteVerifyResp { success: false, score: None, hostname: None });
+    }
+    Json(SiteVerifyResp { success: true, score: Some(claims.score), hostname: Some(claims.hostname) })
 }
 
 async fn content(
@@ -383,7 +458,7 @@ async fn verify(
             return err("rate limited");
         }
     }
-    let (kind, seed, difficulty, created_ts, issuer_ip) = {
+    let (kind, seed, difficulty, created_ts, issuer_ip, nonce, expires_at, expected_instr, site_key) = {
         let mut store = s.store.lock();
         let stored = match store.get(&sol.challenge_id) {
             Some(c) => c,
@@ -406,8 +481,15 @@ async fn verify(
             stored.difficulty,
             stored.created_ts,
             stored.issuer_ip.clone(),
+            stored.nonce.clone(),
+            stored.expires_at,
+            stored.expected_instr,
+            stored.site_key.clone(),
         )
     };
+    if now_secs() > expires_at {
+        return err("challenge expired");
+    }
     let puzzle = match captchas::by_kind(&kind) {
         Some(p) => p,
         None => return err("unknown captcha kind"),
@@ -418,11 +500,13 @@ async fn verify(
         return err("challenge bound to another client");
     }
     let canonical = format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         sol.challenge_id,
         kind,
         hex::encode(&seed),
         difficulty,
+        nonce,
+        expires_at,
         issuer_ip
     );
     if !token::verify_blob(&s.challenge_key, &canonical, &sol.sig) {
@@ -438,6 +522,7 @@ async fn verify(
         Ok(w) => w,
         Err(_) => 0.2,
     };
+    let regularity_weight = difficulty::trail_regularity(&trail, is_touch);
     let timing_weight = difficulty::classify_timing(
         sol.clicks.last().map(|c| c.t).unwrap_or(0.0)
             - sol.clicks.first().map(|c| c.t).unwrap_or(0.0),
@@ -457,6 +542,20 @@ async fn verify(
             log_reject(&ip, m, None);
             return err("verification failed");
         }
+        if let Err(m) = puzzle.track(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.35).await;
+            log_reject(&ip, m, None);
+            return err("verification failed");
+        }
+    }
+    if !is_touch && puzzle.kind() == "two" {
+        if let Err(m) = puzzle.track(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.35).await;
+            log_reject(&ip, m, None);
+            return err("verification failed");
+        }
     }
     let (suspicion, fail_ratio) = {
         let mut profiles = s.profiles.lock();
@@ -466,12 +565,14 @@ async fn verify(
         (p.suspicion, p.fail_ratio())
     };
     let t = &sol.telemetry;
+    let grade_score = 1.0;
     let trust_inputs = TrustInputs {
         trail_weight,
         timing_weight,
-        grade_score: 1.0,
+        grade_score,
         suspicion,
         fail_ratio,
+        regularity_weight,
         page_load_to_first_move_ms: t.page_load_to_first_move_ms,
         focus_events: t.focus_events,
         blur_events: t.blur_events,
@@ -492,20 +593,79 @@ async fn verify(
             token: None,
             message: "verification failed".into(),
             score: Some(0.0),
+            need_challenge: None,
         });
     }
-    let trust = trust_score(&trust_inputs);
-    match trust_decision(trust) {
-        TrustDecision::Pass => {}
-        TrustDecision::StepUp => {
+    let mut trust = trust_score(&trust_inputs, trail.len());
+    if kind == "three" {
+        if !difficulty::nonce_echo_ok(&sol.telemetry, &nonce) {
             record_profile_failure(&s, &ip).await;
-            flag_profile(&s, &ip, 0.15).await;
-            log_reject(&ip, "trust step-up", Some(trust));
+            flag_profile(&s, &ip, 0.4).await;
+            log_reject(&ip, "nonce echo mismatch", None);
+            return Json(VerifyResponse {
+                ok: false,
+                token: None,
+                message: "verification failed".into(),
+                score: Some(0.0),
+                need_challenge: None,
+            });
+        }
+        trust *= difficulty::attestation_consistent(&sol.telemetry);
+        let instr_ok = match (expected_instr, sol.instr_result) {
+            (Some(exp), Some(got)) => exp == got,
+            _ => false,
+        };
+        if !instr_ok {
+            flag_profile(&s, &ip, 0.1).await;
+            log_reject(&ip, "instrumentation failed", Some(trust));
             return Json(VerifyResponse {
                 ok: true,
                 token: None,
                 message: "additional verification required".into(),
                 score: Some(trust),
+                need_challenge: Some("two".to_string()),
+            });
+        }
+        let solve_secs = now_secs().saturating_sub(created_ts);
+        if solve_secs < difficulty::PASSIVE_MIN_SOLVE_SECS {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.5).await;
+            log_reject(&ip, "passive solved too fast", Some(trust));
+            return Json(VerifyResponse {
+                ok: false,
+                token: None,
+                message: "verification failed".into(),
+                score: Some(0.0),
+                need_challenge: None,
+            });
+        }
+        if trust < difficulty::PASSIVE_PASS_THRESHOLD {
+            log_reject(&ip, "passive low trust", Some(trust));
+            return Json(VerifyResponse {
+                ok: true,
+                token: None,
+                message: "additional verification required".into(),
+                score: Some(trust),
+                need_challenge: Some("two".to_string()),
+            });
+        }
+    }
+    match trust_decision(trust) {
+        TrustDecision::Pass => {}
+        TrustDecision::StepUp => {
+            flag_profile(&s, &ip, 0.10).await;
+            log_reject(&ip, "trust step-up", Some(trust));
+            let need_challenge = if kind == "three" {
+                Some("two".to_string())
+            } else {
+                None
+            };
+            return Json(VerifyResponse {
+                ok: true,
+                token: None,
+                message: "additional verification required".into(),
+                score: Some(trust),
+                need_challenge,
             });
         }
         TrustDecision::Fail => {
@@ -517,6 +677,7 @@ async fn verify(
                 token: None,
                 message: "verification failed".into(),
                 score: Some(trust),
+                need_challenge: None,
             });
         }
     }
@@ -555,6 +716,7 @@ async fn verify(
                 token: None,
                 message: format!("round {} of {} complete", count, rounds_required),
                 score: Some(trust),
+                need_challenge: None,
             });
         }
         s.profiles.lock().entry(ip.clone()).and_modify(|p| p.reset_rounds(&kind));
@@ -566,7 +728,7 @@ async fn verify(
         let iat = now_secs();
         let claims = TokenClaims {
             challenge_id: sol.challenge_id.clone(),
-            site_key: String::new(),
+            site_key: site_key.clone(),
             hostname: String::new(),
             ip: ip.clone(),
             issued_at: created_ts.max(iat.saturating_sub(TTL.as_secs())),
@@ -579,6 +741,7 @@ async fn verify(
             token: Some(signed),
             message: "verified".into(),
             score: Some(trust),
+            need_challenge: None,
         })
     } else {
         record_profile_failure(&s, &ip).await;
@@ -588,6 +751,7 @@ async fn verify(
             token: None,
             message: "proof invalid".into(),
             score: Some(trust),
+            need_challenge: None,
         })
     }
 }

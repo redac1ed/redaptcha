@@ -32,16 +32,31 @@ impl Captcha for MovingBall {
         let movers = gen_movers_from(challenge_key, challenge_id);
         let mut rseed = [0u8; 32];
         token::derive_bytes(challenge_key, &format!("render|{challenge_id}"), &mut rseed);
-        let (ring, core) = derive_colors(&rseed);
-        let decoys = gen_decoys(&rseed);
+        let (hue, ring, core) = derive_colors(&rseed);
+        let decoys = gen_decoys(&rseed, hue);
+        let noise = bg_noise(&rseed);
         let frames_b64 = movers.par_iter()
-            .map(|m| render_panel(m, ring, core, &decoys))
+            .map(|m| render_panel(m, hue, ring, core, &decoys, &noise))
             .collect();
         Rendered { frames_b64, slider: None }
     }
     fn grade(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], _trail: &[core_types::TrailPoint],) -> Result<(), &'static str> {
         let movers = gen_movers_from(challenge_key, challenge_id);
         grade_clicks(&movers, clicks)
+    }
+    fn track(&self, challenge_key: &[u8], challenge_id: &str, clicks: &[Click], trail: &[core_types::TrailPoint]) -> Result<(), &'static str> {
+        let movers = gen_movers_from(challenge_key, challenge_id);
+        let assign = assign_movers(&movers, clicks);
+        let trail_t: Vec<(f64, f64, f64)> = trail.iter().map(|p| (p.x, p.y, p.t)).collect();
+        let click_t: Vec<(f64, f64, f64)> = clicks.iter().map(|c| (c.x, c.y, c.t)).collect();
+        let target_at = |ci: usize, t: f64| -> Option<(f64, f64)> {
+            let mi = *assign.get(ci)?;
+            let m = movers.get(mi?)?;
+            let frame = (t / FRAME_DT_MS).floor() as i64;
+            let seen = frame.rem_euclid(FRAME_COUNT as i64) as f64;
+            Some(pos_at_center(m, seen * FRAME_DT_MS))
+        };
+        crate::difficulty::track_coherent(&trail_t, &click_t, target_at)
     }
 }
 
@@ -61,11 +76,16 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [u8; 3] {
     [((r + m) * 255.0).round() as u8, ((g + m) * 255.0).round() as u8, ((b + m) * 255.0).round() as u8]
 }
 
-fn derive_colors(seed: &[u8]) -> ([u8; 4], [u8; 4]) {
+fn derive_colors(seed: &[u8]) -> (f64, [u8; 4], [u8; 4]) {
     let hue = seed[16] as f64 / 255.0 * 340.0 + 10.0;
     let [r, g, b] = hsl_to_rgb(hue, 0.82, 0.54);
     let [cr, cg, cb] = hsl_to_rgb(hue, 0.20, 0.91);
-    ([r, g, b, 255], [cr, cg, cb, 255])
+    (hue, [r, g, b, 255], [cr, cg, cb, 255])
+}
+
+fn core_for(hue: f64) -> [u8; 4] {
+    let [cr, cg, cb] = hsl_to_rgb(hue, 0.20, 0.91);
+    [cr, cg, cb, 255]
 }
 
 struct Decoy {
@@ -76,9 +96,11 @@ struct Decoy {
     amp: f64,
     turns: f64,
     color: [u8; 4],
+    core: [u8; 4],
+    radius: f64,
 }
 
-fn gen_decoys(seed: &[u8]) -> Vec<Decoy> {
+fn gen_decoys(seed: &[u8], target_hue: f64) -> Vec<Decoy> {
     let mut st: u64 = u64::from_le_bytes(seed[16..24].try_into().unwrap()) | 1;
     let mut next = move || -> f64 {
         st ^= st << 13; st ^= st >> 7; st ^= st << 17;
@@ -86,12 +108,18 @@ fn gen_decoys(seed: &[u8]) -> Vec<Decoy> {
     };
     let mut out = Vec::with_capacity(N_DECOYS);
     for _ in 0..N_DECOYS {
-        let hue = next() * 360.0;
-        let [r, g, b] = hsl_to_rgb(hue, 0.75, 0.50);
+        let mut hue = next() * 360.0;
+        let mut guard = 0;
+        while (hue - target_hue).abs() < 28.0 && guard < 16 {
+            hue = next() * 360.0;
+            guard += 1;
+        }
+        let [r, g, b] = hsl_to_rgb(hue, 0.82, 0.54);
         let amp = ORBIT_AMP_MIN * 0.6 + next() * (ORBIT_AMP_MAX - ORBIT_AMP_MIN) * 0.6;
         let margin = DECOY_R + amp * 1.4 + 4.0;
         let x = margin + next() * (PUZZLE_W as f64 - 2.0 * margin);
         let y = margin + next() * (PUZZLE_H as f64 - 2.0 * margin);
+        let radius = TARGET_R * (0.92 + next() * 0.16);
         out.push(Decoy {
             x0: x, y0: y,
             vx: next() * std::f64::consts::TAU,
@@ -99,7 +127,19 @@ fn gen_decoys(seed: &[u8]) -> Vec<Decoy> {
             amp,
             turns: ORBIT_TURNS_MIN + next() * (ORBIT_TURNS_MAX - ORBIT_TURNS_MIN),
             color: [r, g, b, 255],
+            core: core_for(hue),
+            radius,
         });
+    }
+    out
+}
+
+fn bg_noise(seed: &[u8]) -> [u8; 96] {
+    let mut st: u64 = u64::from_le_bytes(seed[8..16].try_into().unwrap()) | 1;
+    let mut out = [0u8; 96];
+    for v in out.iter_mut() {
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        *v = (st >> 24) as u8;
     }
     out
 }
@@ -170,16 +210,63 @@ fn pos_at_center(m: &Mover, t: f64) -> (f64, f64) {
     (px, py)
 }
 
-fn render_panel(m: &Mover, ring: [u8; 4], core: [u8; 4], decoys: &[Decoy]) -> String {
+fn paint_background(img: &mut RgbaImage, noise: &[u8; 96]) {
+    let iw = img.width() as usize;
+    let ih = img.height() as usize;
+    let buf = img.as_mut();
+    let cell = 24usize;
+    for y in 0..ih {
+        let row = y * iw * 4;
+        for x in 0..iw {
+            let gx = (x / cell) & 7;
+            let gy = (y / cell) & 7;
+            let n = noise[((gy * 8 + gx) + ((x ^ y) & 1)) % 96] as i32;
+            let i = row + x * 4;
+            let base_r = buf[i] as i32 + ((n % 17) - 8);
+            let base_g = buf[i + 1] as i32 + ((n % 13) - 6);
+            let base_b = buf[i + 2] as i32 + ((n % 23) - 11);
+            buf[i] = base_r.clamp(0, 60) as u8;
+            buf[i + 1] = base_g.clamp(0, 70) as u8;
+            buf[i + 2] = base_b.clamp(20, 110) as u8;
+        }
+    }
+}
+
+fn draw_swatch(img: &mut RgbaImage, ox: f64, rgb: [u8; 3]) {
+    let x0 = (ox + 6.0) as u32;
+    let y0 = 6u32;
+    let s = 18u32;
+    let iw = img.width();
+    let buf = img.as_mut();
+    for yy in y0..(y0 + s) {
+        let row = (yy as usize) * (iw as usize) * 4;
+        for xx in x0..(x0 + s) {
+            if xx >= iw { continue; }
+            let edge = yy == y0 || yy == y0 + s - 1 || xx == x0 || xx == x0 + s - 1;
+            let i = row + (xx as usize) * 4;
+            if edge {
+                buf[i] = 245; buf[i + 1] = 245; buf[i + 2] = 245; buf[i + 3] = 255;
+            } else {
+                buf[i] = rgb[0]; buf[i + 1] = rgb[1]; buf[i + 2] = rgb[2]; buf[i + 3] = 255;
+            }
+        }
+    }
+}
+
+fn render_panel(m: &Mover, hue: f64, ring: [u8; 4], core: [u8; 4], decoys: &[Decoy], noise: &[u8; 96]) -> String {
     let cols = FRAME_COUNT;
     let strip_w = PUZZLE_W * cols;
     let mut img = RgbaImage::from_pixel(strip_w, PUZZLE_H, image::Rgba([4, 8, 36, 255]));
+    paint_background(&mut img, noise);
+    let swatch = hsl_to_rgb(hue, 0.82, 0.54);
     for f in 0..cols {
         let t = f as f64 * FRAME_DT_MS;
         let ox = f * PUZZLE_W;
+        draw_swatch(&mut img, ox as f64, swatch);
         for d in decoys {
             let (dx, dy) = decoy_pos(d, t);
-            fill_circle(&mut img, ox as f64 + dx, dy, DECOY_R, d.color);
+            fill_circle(&mut img, ox as f64 + dx, dy, d.radius, d.color);
+            fill_circle(&mut img, ox as f64 + dx, dy, d.radius * 0.42, d.core);
         }
         let (x, y) = pos_at_center(m, t);
         fill_circle(&mut img, ox as f64 + x, y, TARGET_R, ring);
@@ -192,6 +279,33 @@ fn render_panel(m: &Mover, ring: [u8; 4], core: [u8; 4], decoys: &[Decoy]) -> St
     B64.encode(&buf)
 }
 
+
+fn assign_movers(movers: &[Mover], clicks: &[Click]) -> Vec<Option<usize>> {
+    let mut used = vec![false; movers.len()];
+    let mut out = Vec::with_capacity(clicks.len());
+    for c in clicks {
+        let frame = (c.t / FRAME_DT_MS).floor() as i64;
+        let seen_frame = frame.rem_euclid(FRAME_COUNT as i64) as f64;
+        let t_seen = seen_frame * FRAME_DT_MS;
+        let mut matched = None;
+        for (i, m) in movers.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let (tx, ty) = pos_at_center(m, t_seen);
+            let d = ((c.x - tx).powi(2) + (c.y - ty).powi(2)).sqrt();
+            if d <= HIT_R {
+                matched = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = matched {
+            used[i] = true;
+        }
+        out.push(matched);
+    }
+    out
+}
 
 fn grade_clicks(movers: &[Mover], clicks: &[Click]) -> Result<(), &'static str> {
     let mut used = vec![false; movers.len()];

@@ -3,7 +3,7 @@ Another CAPTCHA that protects websites from bots and all.
 
 # Types of CAPTCHAs:
 - **Click CAPTCHA**, where you have to click on the targets moving at random speeds and directions 
-- **Slider CAPTCHA**, where you have to drag a piece of the image (currently using a gradient) to the correct position.
+- **Puzzle CAPTCHA**, where you have to click a hole that fits the piece in an image (currently using a gradient). 
 
 # Features:
 - **VDF time lock**: Every solve runs a Wesolowski Verifiable Delay Function (VDF), a sequential PoW over a RSA group in the browser to force a minimum wall-clock cost per attempt.
@@ -16,6 +16,7 @@ Another CAPTCHA that protects websites from bots and all.
 - and more!
 
 # How to use:
+## Development:
 - Run the server:
 ```bash
 cargo run -p server
@@ -27,6 +28,13 @@ npm install
 npm run dev
 ```
 
+## Production:
+- Add the enviromental variables (see below) in `.env.local`.
+- Build and run the server:
+```bash
+docker compose up -d
+```
+
 # Configurations:
 - `REDAPTCHA_TOKEN_KEY`: B64 of 32 bytes; HMAC key for unlock tokens (auto-generated if not set).
 - `REDAPTCHA_CHALLENGE_KEY`: B64 of 32 bytes; HMAC key for challenge signing/derivation (auto-generated if not set).
@@ -35,6 +43,20 @@ npm run dev
 - `VITE_SERVER` (optional, frontend): API base URL, defaults to the same origin. 
 - `REDAPTCHA_ENV` (optional): Set to `production` to enable prod. hardening (requires all the above secrets to be set).
 - `PORT` (optional): Server listening port, defaults to `3000`.
+
+# Usage:
+To use this in your website/app, add this script to your HTML page:
+```html
+<form action="/submit" method="POST">
+  <div class="redaptcha" data-sitekey="rk_live_demo"></div>
+  <button type="submit">Submit</button>
+</form>
+<script type="module"
+        src="https://your-host/redaptcha.js"
+        data-endpoint="https://your-host"></script>
+```
+
+Note: replace `https://your-host` with the actual URL and `rk_live_demo` with an actual site key. This is meant to be an example script that you can use, but I recommend using this as per your needs.
 
 # License:
 This project is open source and available under the MIT License.

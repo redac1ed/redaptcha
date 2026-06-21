@@ -1,0 +1,35 @@
+services:
+  redaptcha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: redaptcha
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
+    environment:
+      PORT: 3000
+      # uncomment to share the redeem log
+      # REDIS_URL: redis://redis:6379
+    # depends_on:
+    #   redis:
+    #     condition: service_healthy
+    restart: unless-stopped
+
+  # optional for token storage
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: redaptcha-redis
+  #   command: redis-server --save 60 1 --loglevel warning
+  #   volumes:
+  #     - redis-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
+
+# volumes:
+#   redis-data:
