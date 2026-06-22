@@ -43,6 +43,9 @@ docker compose up -d
 - `VITE_SERVER` (optional, frontend): API base URL, defaults to the same origin. 
 - `REDAPTCHA_ENV` (optional): Set to `production` to enable prod. hardening (requires all the above secrets to be set).
 - `PORT` (optional): Server listening port, defaults to `3000`.
+- `REDAPTCHA_VPN_BLOCK` (optional): Set to `true` to block known VPN/proxy IPs. Off by default. When enabled, a public VPN IP list is fetched at startup and refreshed every 6h; blocking fails open (keeps the last good list, or none, if the fetch fails).
+- `REDAPTCHA_VPN_BLOCK_UNKNOWN` (optional): When VPN blocking is on, also block IPs that can't be classified (e.g. unparseable or IPv6 without a v4 mapping). Stricter; may reject legitimate users.
+- `REDAPTCHA_BLOCK_CIDRS` (optional): Path to a file of extra CIDR ranges (one per line, `#` comments allowed) to block in addition to the fetched list.
 
 # Usage:
 To use this in your website/app, add this script to your HTML page:

@@ -35,6 +35,8 @@ pub const PASSIVE_PASS_THRESHOLD: f64 = 0.30;
 pub const PASSIVE_MIN_TRAIL_POINTS: usize = 14;
 pub const PASSIVE_MIN_MOVE_EVENTS: u32 = 24;
 pub const PASSIVE_MIN_SOLVE_SECS: u64 = 8;
+pub const SOLVE_RATE_WINDOW: Duration = Duration::from_secs(60);
+pub const MAX_SOLVES_PER_WINDOW: u32 = 2;
 
 pub struct GlobalLimiter {
     pub count: u32,
@@ -51,7 +53,9 @@ pub struct ClientProfile {
     pub suspicion: f64,
     pub verify_count: u32,
     pub verify_window_start: Instant,
-    pub solved_rounds: std::collections::HashMap<String, (u32, Instant)>
+    pub solved_rounds: std::collections::HashMap<String, (u32, Instant)>,
+    pub solve_count: u32,
+    pub solve_window_start: Instant,
 }
 
 pub struct TrailStats {
@@ -113,6 +117,8 @@ impl ClientProfile {
             verify_count: 0,
             verify_window_start: now,
             solved_rounds: std::collections::HashMap::new(),
+            solve_count: 0,
+            solve_window_start: now,
         }
     }
     pub fn roll_window(&mut self, now: Instant) {
@@ -145,6 +151,17 @@ impl ClientProfile {
             return false;
         }
         self.verify_count += 1;
+        true
+    }
+    pub fn register_solve(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.solve_window_start) > SOLVE_RATE_WINDOW {
+            self.solve_count = 0;
+            self.solve_window_start = now;
+        }
+        if self.solve_count >= MAX_SOLVES_PER_WINDOW {
+            return false;
+        }
+        self.solve_count += 1;
         true
     }
     pub fn record_round(&mut self, kind: &str, now: Instant, window: Duration) -> u32 {

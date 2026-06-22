@@ -6,6 +6,7 @@ mod setup;
 mod token;
 mod store;
 mod sitekeys;
+mod netintel;
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
@@ -19,12 +20,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use core_types::{Challenge, ChallengeRequest, Solution, VerifyResponse};
 use difficulty::{
     difficulty_for, is_headless, pursuit_coherent, trust_decision, trust_score, ClientProfile,
     GlobalLimiter, TrustDecision, TrustInputs, FRAME_COUNT, FRAME_DT_MS,
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use core_types::{Challenge, ChallengeRequest, Solution, VerifyResponse};
 use num_bigint::BigUint;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -64,6 +65,7 @@ struct AppState {
     redeem: store::RedeemStore,
     global: Mutex<GlobalLimiter>,
     sites: sitekeys::SiteRegistry,
+    netintel: Arc<netintel::NetIntel>,
 }
 
 #[derive(serde::Deserialize)]
@@ -174,7 +176,9 @@ async fn main() {
         redeem,
         global: Mutex::new(GlobalLimiter::new(Instant::now())),
         sites,
+        netintel: Arc::new(netintel::NetIntel::from_env()),
     });
+    state.netintel.clone().spawn_refresher();
     let st = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(300));
@@ -440,6 +444,13 @@ async fn verify(
     Json(sol): Json<Solution>,
 ) -> Json<VerifyResponse> {
     let ip = client_ip(&addr, &headers);
+    if s.netintel.is_enabled() {
+        let class = s.netintel.classify(&ip);
+        if s.netintel.should_block(class) {
+            log_reject(&ip, "blocked vpn/proxy ip", None);
+            return err("verification failed");
+        }
+    }
     if sol.output_hex.len() > 4096 || sol.proof_hex.len() > 4096 {
         return err("input too large");
     }
@@ -723,6 +734,23 @@ async fn verify(
     }
     let ok = s.params.verify(&x, difficulty, &vdf_proof);
     if ok {
+        {
+            let now = Instant::now();
+            let mut profiles = s.profiles.lock();
+            let profile = profiles
+                .entry(ip.clone())
+                .or_insert_with(|| ClientProfile::new(now));
+            if !profile.register_solve(now) {
+                log_reject(&ip, "solve rate limited", Some(trust));
+                return Json(VerifyResponse {
+                    ok: false,
+                    token: None,
+                    message: "rate limited".into(),
+                    score: Some(trust),
+                    need_challenge: None,
+                });
+            }
+        }
         s.store.lock().remove(&sol.challenge_id);
         record_profile_success(&s, &ip).await;
         let iat = now_secs();
