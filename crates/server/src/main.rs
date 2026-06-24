@@ -1,12 +1,14 @@
 mod captcha;
 mod captchas;
 mod difficulty;
+mod httpfp;
 mod instr;
 mod setup;
 mod token;
 mod store;
 mod sitekeys;
 mod netintel;
+mod pow;
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
@@ -52,6 +54,7 @@ struct Stored {
     nonce: String,
     expires_at: u64,
     expected_instr: Option<u32>,
+    pow_bits: Option<u32>,
     site_key: String,
 }
 
@@ -222,7 +225,8 @@ async fn main() {
         .layer(cors)
         .with_state(state);
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
-    let addr = format!("0.0.0.0:{port}");
+    let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
@@ -286,6 +290,13 @@ async fn issue(
     Json(req): Json<ChallengeRequest>,
 ) -> Result<Json<Challenge>, Json<VerifyResponse>> {
     let ip = client_ip(&addr, &headers);
+    if s.netintel.is_enabled() {
+        let class = s.netintel.classify(&ip);
+        if s.netintel.should_block(class) {
+            log_reject(&ip, "blocked vpn/proxy ip", None);
+            return Err(err("verification failed"));
+        }
+    }
     if !s.sites.is_empty() {
         let sk = req.site_key.trim();
         if !s.sites.contains(sk) {
@@ -304,7 +315,7 @@ async fn issue(
     if !s.global.lock().allow(now) {
         return Err(err("server busy"));
     }
-    let difficulty = {
+    let (difficulty, pow_bits) = {
         let mut profiles = s.profiles.lock();
         enforce_profile_cap(&mut profiles, &ip, now);
         let profile = profiles
@@ -315,9 +326,12 @@ async fn issue(
             return Err(err("rate limited"));
         }
         if kind == "three" {
-            difficulty::passive_difficulty_for(profile)
+            (
+                difficulty::passive_difficulty_for(profile),
+                Some(pow::params_for(profile.suspicion, profile.fail_ratio())),
+            )
         } else {
-            difficulty_for(profile)
+            (difficulty_for(profile), None)
         }
     };
     let id = Uuid::new_v4().to_string();
@@ -327,6 +341,7 @@ async fn issue(
     let mut nonce_bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = hex::encode(nonce_bytes);
+    let pow = pow_bits.map(|bits| pow::challenge(&seed_hex, bits));
     let rendered = puzzle.generate(&s.challenge_key, &id);
     let frames_b64 = rendered.frames_b64;
     let slider = rendered.slider;
@@ -353,6 +368,7 @@ async fn issue(
                 nonce: nonce.clone(),
                 expires_at,
                 expected_instr,
+                pow_bits,
                 site_key: site_key.clone(),
             },
         );
@@ -378,6 +394,7 @@ async fn issue(
         instr: instr_json, 
         sig,
         slider,
+        pow,
     }))
 }
 
@@ -469,7 +486,7 @@ async fn verify(
             return err("rate limited");
         }
     }
-    let (kind, seed, difficulty, created_ts, issuer_ip, nonce, expires_at, expected_instr, site_key) = {
+    let (kind, seed, difficulty, created_ts, issuer_ip, nonce, expires_at, expected_instr, pow_bits, site_key) = {
         let mut store = s.store.lock();
         let stored = match store.get(&sol.challenge_id) {
             Some(c) => c,
@@ -495,6 +512,7 @@ async fn verify(
             stored.nonce.clone(),
             stored.expires_at,
             stored.expected_instr,
+            stored.pow_bits,
             stored.site_key.clone(),
         )
     };
@@ -525,6 +543,41 @@ async fn verify(
         flag_profile(&s, &ip, 0.5).await;
         return err("invalid challenge signature");
     }
+    let (header_fp, ja4_fp) = if httpfp::is_disabled() {
+        (1.0, 1.0)
+    } else {
+        let hf = match httpfp::browser_fingerprint(&headers) {
+            Ok(score) => score,
+            Err(reason) => {
+                record_profile_failure(&s, &ip).await;
+                flag_profile(&s, &ip, 0.5).await;
+                log_reject(&ip, reason, None);
+                return Json(VerifyResponse {
+                    ok: false,
+                    token: None,
+                    message: "verification failed".into(),
+                    score: Some(0.0),
+                    need_challenge: None,
+                });
+            }
+        };
+        let jf = match httpfp::ja4_consistent(&headers) {
+            Ok(score) => score,
+            Err(reason) => {
+                record_profile_failure(&s, &ip).await;
+                flag_profile(&s, &ip, 0.6).await;
+                log_reject(&ip, reason, None);
+                return Json(VerifyResponse {
+                    ok: false,
+                    token: None,
+                    message: "verification failed".into(),
+                    score: Some(0.0),
+                    need_challenge: None,
+                });
+            }
+        };
+        (hf, jf)
+    };
     let is_touch = sol.input_type.eq_ignore_ascii_case("touch")
         || sol.input_type.eq_ignore_ascii_case("pen")
         || sol.telemetry.has_touch;
@@ -607,7 +660,7 @@ async fn verify(
             need_challenge: None,
         });
     }
-    let mut trust = trust_score(&trust_inputs, trail.len());
+    let mut trust = trust_score(&trust_inputs, trail.len()) * header_fp * ja4_fp;
     if kind == "three" {
         if !difficulty::nonce_echo_ok(&sol.telemetry, &nonce) {
             record_profile_failure(&s, &ip).await;
@@ -635,6 +688,22 @@ async fn verify(
                 message: "additional verification required".into(),
                 score: Some(trust),
                 need_challenge: Some("two".to_string()),
+            });
+        }
+        let pow_ok = match (sol.pow_nonce, sol.pow_hash_hex.as_deref(), pow_bits) {
+            (Some(n), Some(h), Some(bits)) => pow::verify(&seed, bits, n, h),
+            _ => false,
+        };
+        if !pow_ok {
+            record_profile_failure(&s, &ip).await;
+            flag_profile(&s, &ip, 0.4).await;
+            log_reject(&ip, "pow failed", Some(trust));
+            return Json(VerifyResponse {
+                ok: false,
+                token: None,
+                message: "verification failed".into(),
+                score: Some(0.0),
+                need_challenge: None,
             });
         }
         let solve_secs = now_secs().saturating_sub(created_ts);

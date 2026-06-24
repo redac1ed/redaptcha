@@ -12,6 +12,8 @@ pub struct Challenge {
     pub frames_b64: Vec<String>,
     #[serde(default)]
     pub slider: Option<SliderHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pow: Option<PowChallenge>,
     pub frame_count: u32,
     pub frame_dt_ms: f64,
     pub puzzle_w: f64,
@@ -27,6 +29,15 @@ pub struct SliderHint {
     pub piece_h: f64,
     pub start_x: f64,
     pub start_y: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PowChallenge {
+    pub salt_hex: String,
+    pub m_cost: u32,
+    pub t_cost: u32,
+    pub p_cost: u32,
+    pub bits: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -141,6 +152,10 @@ pub struct Solution {
     pub instr_result: Option<u32>,
     #[serde(default)]
     pub telemetry: SessionTelemetry,
+    #[serde(default)]
+    pub pow_nonce: Option<u64>,
+    #[serde(default)]
+    pub pow_hash_hex: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -5,6 +5,7 @@ const TIME_LIMIT = 15000;
 const EXPECTED_CLICKS = 3;
 const HIT_R = 22;
 const SLIDER_ROUNDS = 3;
+const PURSUIT_MS = 4200;
 
 const session = {
   pageLoad: Date.now(),
@@ -243,8 +244,6 @@ async function unlockContent(token) {
 export function createCaptcha(card, opts = {}) {
   const SERVER_URL = opts.server ?? SERVER;
   const SITE_KEY_W = opts.siteKey ?? SITE_KEY;
-  let CAPTCHA_KIND = card.dataset.kind;
-  let fallbackKind = null;
   const canvas = card.querySelector('[data-role="canvas"]');
   const ctx = canvas.getContext("2d");
   const statusEl = card.querySelector('[data-role="status"]');
@@ -255,6 +254,8 @@ export function createCaptcha(card, opts = {}) {
   const progressEl = card.querySelector('[data-role="progress"]');
   const CORE_R = 7;
   const CORE_LUM_THRESHOLD = 175;
+  let CAPTCHA_KIND = card.dataset.kind;
+  let fallbackKind = null;
   let state = "idle";
   let challenge = null;
   let passiveIssuedAt = 0;
@@ -291,6 +292,10 @@ export function createCaptcha(card, opts = {}) {
   let selT = 0;
   let confirmReady = false;
   let rafID = 0;
+  let powNonce = null;
+  let powHashHex = null;
+  let isPursuit = false;
+  let pursuitTimer = 0;
 
   function setUi() {
     captchaEl.classList.toggle("is-loading", state === "vdf");
@@ -480,8 +485,44 @@ export function createCaptcha(card, opts = {}) {
         instrResult = null;
       }
     }
+    powNonce = null;
+    powHashHex = null;
+    if (challenge.pow) {
+      statusEl.textContent = "Verifying…";
+      try {
+        const r = await solvePow(challenge.pow);
+        powNonce = r.nonce;
+        powHashHex = r.hashHex;
+      } catch {
+        powNonce = null;
+        powHashHex = null;
+      }
+    }
     puzzleSolved();
   }
+
+  function solvePow(pow) {
+    return new Promise((resolve, reject) => {
+      const w = new Worker(new URL("./pow-worker.js", import.meta.url), { type: "module" });
+      w.onmessage = (e) => {
+        if (e.data.type === "done") {
+          w.terminate();
+          resolve({ nonce: e.data.nonce, hashHex: e.data.hashHex });
+        } else if (e.data.type === "error") {
+          w.terminate();
+          reject(new Error(e.data.message));
+        }
+      };
+      w.postMessage({
+        saltHex: pow.salt_hex,
+        mCost: pow.m_cost,
+        tCost: pow.t_cost,
+        pCost: pow.p_cost,
+        bits: pow.bits,
+      });
+    });
+  }
+
   async function startChallenge() {
     if (fallbackKind) {
       CAPTCHA_KIND = fallbackKind;
@@ -522,6 +563,7 @@ export function createCaptcha(card, opts = {}) {
     frameDt = challenge.frame_dt_ms || 50;
     panelMotions = Array.isArray(challenge.motions) ? challenge.motions : [];
     isSlider = challenge.kind === "two";
+    isPursuit = challenge.kind === "four";
     sliderHint = challenge.slider || null;
     panelStrips = [];
     for (const b64 of challenge.frames_b64) {
@@ -554,6 +596,8 @@ export function createCaptcha(card, opts = {}) {
       selY = -1;
       confirmReady = false;
       statusEl.textContent = "Click the hole that fits the piece";
+    } else if (isPursuit) {
+      statusEl.textContent = "Follow the moving target with your cursor";
     } else {
       statusEl.textContent = "Click a ball with the color shown";
     }
@@ -563,6 +607,12 @@ export function createCaptcha(card, opts = {}) {
     timerBar.style.transform = "scaleX(1)";
     setUi();
     startLoop();
+    if (isPursuit) {
+      if (progressEl) progressEl.textContent = "Tracking…";
+      pursuitTimer = setTimeout(() => {
+        if (state === "active") puzzleSolved();
+      }, PURSUIT_MS);
+    }
   }
 
   function advancePanel() {
@@ -600,6 +650,8 @@ export function createCaptcha(card, opts = {}) {
       modulusHex: challenge.modulus_hex,
       difficulty: challenge.difficulty,
       clicks,
+      powNonce, 
+      powHashHex,
     });
   }
 
@@ -627,6 +679,8 @@ export function createCaptcha(card, opts = {}) {
           input_type: inputType,
           instr_result: instrResult,
           telemetry: telemetrySnapshot(challenge.nonce),
+          pow_nonce: powNonce,
+          pow_hash_hex: powHashHex,
         }),
       });
       const result = await res.json();
@@ -669,6 +723,7 @@ export function createCaptcha(card, opts = {}) {
   }
 
   function fail() {
+    if (pursuitTimer) { clearTimeout(pursuitTimer); pursuitTimer = 0; }
     state = "failed";
     timerBar.style.opacity = "0";
     statusEl.textContent = "Expired — click to retry";
@@ -701,9 +756,13 @@ export function createCaptcha(card, opts = {}) {
     selX = -1;
     selY = -1;
     confirmReady = false;
-    if (progressEl) progressEl.textContent = "";
+    powNonce = null;
+    powHashHex = null;
     timerBar.style.opacity = "0";
     statusEl.textContent = "Verify you are human";
+    isPursuit = false;
+    if (pursuitTimer) { clearTimeout(pursuitTimer); pursuitTimer = 0;}
+    if (progressEl) progressEl.textContent = "";
     setUi();
   }
 
@@ -718,6 +777,7 @@ export function createCaptcha(card, opts = {}) {
   canvas.addEventListener("click", (e) => {
     if (state !== "active") return;
     if (isSlider) return;
+    if (isPursuit) return;
     if (Date.now() < flashUntil) return;
     if (touchClickPending) { touchClickPending = false; return; }
     const rect = canvas.getBoundingClientRect();
@@ -746,7 +806,7 @@ export function createCaptcha(card, opts = {}) {
     const t = Date.now() - puzzleStart;
     trail.push({ x: Math.round(cx), y: Math.round(cy), t: Math.round(t) });
     if (trail.length > 400) trail.shift();
-    if (e.pointerType === "touch" && Date.now() >= flashUntil) {
+    if (e.pointerType === "touch" && Date.now() >= flashUntil && !isPursuit) {
       if (!isBallPixel(cx, cy)) {
         statusEl.textContent = "Missed - tap a ball with the color shown";
         return;

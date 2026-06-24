@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vdf", "crates/core", "crates/server"]
+members = ["crates/vdf", "crates/core", "crates/server", "crates/ja4proxy"]
 
 [workspace.package]
 edition = "2021"
