@@ -66,19 +66,3 @@ This project is open source and available under the MIT License.
 
 # Authors:
 Created by redac1ed. 
-
-
-
-heya!! this is going to be my final journal, since after this i am going to ship the project. 
-
-the last thing left from the previous journal was to make the last, 4th captcha which would be much more difficult to bot. the idea is that you have to follow the ball moving in random directions to make it look like you are a human. my idea behind this was that cursor trails are pretty hard to replicate, so this should be a good way to detect bots.
-
-and it actually was! almost 90% of my testing time got wasted, though i was still able to bot the captcha. but that was fine! i have already stated and accepted that every captcha can be broken, but the main purpose is to make it expensive for the person (both money and time) to break it.
-
-next, i decided to add a reverse proxy (ja4proxy) that terminnates the TLS and makes a ja4 fingerprint which cant be spoofed by normal headless browsers. this then injects a header and forwards it to the backend to match the consistency of the requests using the existing trust score.
-
-but then i realised that this cant be run on heroku, since it terminates TLS (i found this out at the very last minute), so i had to move to nest to host the current captcha. this way everything i own would work.
-
-then i also added vpn blocking that would block vpn ips and proxies to be blocked (can be disabled according to you) and hardened the rate limiting to be more strict. this way, a massive botnet would need a lot of preparations to bot the captcha.
-
-now, everything is ready to be shipped. 
