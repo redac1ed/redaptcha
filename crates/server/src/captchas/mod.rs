@@ -12,6 +12,7 @@ pub fn by_kind(kind: &str) -> Option<Box<dyn Captcha + Send + Sync>> {
         "one" => Some(Box::new(one::MovingBall)),
         "two" => Some(Box::new(two::Slider)),
         "three" => Some(Box::new(three::Passive)),
+        "four" => Some(Box::new(four::Pursuit)),
         _ => None,
     }
 }

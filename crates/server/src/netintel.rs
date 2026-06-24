@@ -7,6 +7,7 @@ const MIN_SAFE_PREFIX: u32 = 8;
 const MAX_RANGES: usize = 5_000_000;
 const REFRESH_SECS: u64 = 6*3600;
 const LIST_URL: &str = "http://az0-vpnip-public.oooninja.com/ip.txt";
+const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpClass {
@@ -171,14 +172,38 @@ async fn fetch_http(url: &str) -> Option<String> {
     );
     stream.write_all(req.as_bytes()).await.ok()?;
     let mut buf = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        stream.read_to_end(&mut buf),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.read(&mut chunk),
+        )
+        .await
+        {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+            _ => return None,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_RESPONSE_BYTES {
+            eprintln!("netintel: VPN list exceeded {MAX_RESPONSE_BYTES} bytes, aborting");
+            return None;
+        }
+    }
     let text = String::from_utf8_lossy(&buf);
+    let status_ok = text
+        .lines()
+        .next()
+        .map(|l| {
+            let mut parts = l.split_whitespace();
+            parts.next();
+            parts.next() == Some("200")
+        })
+        .unwrap_or(false);
+    if !status_ok {
+        eprintln!("netintel: VPN list fetch non-200 status");
+        return None;
+    }
     let body = text.split("\r\n\r\n").nth(1)?;
     Some(strip_chunked(body))
 }

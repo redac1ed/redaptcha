@@ -1,0 +1,18 @@
+[package]
+name = "ja4proxy"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "ja4proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+sha2.workspace = true
+hex = "0.4"
+httparse = "1"
+rcgen = "0.13"
