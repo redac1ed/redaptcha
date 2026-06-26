@@ -4,17 +4,37 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: redaptcha
-    ports:
-      - "127.0.0.1:3000:3000"
+    expose:
+      - "3000"
     env_file:
       - .env.local
     environment:
       PORT: 3000
+      BIND_HOST: 0.0.0.0
       # uncomment to share the redeem log
       # REDIS_URL: redis://redis:6379
     # depends_on:
     #   redis:
     #     condition: service_healthy
+    restart: unless-stopped
+
+  ja4proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    container_name: redaptcha-ja4proxy
+    ports:
+      - "8443:8443"
+    environment:
+      JA4PROXY_LISTEN: "0.0.0.0:8443"
+      JA4PROXY_BACKEND: "redaptcha:3000"
+      # mount real certs here in production; omit for an ephemeral self-signed localhost cert
+      # JA4PROXY_CERT: "/certs/fullchain.pem"
+      # JA4PROXY_KEY: "/certs/privkey.pem"
+    # volumes:
+    #   - ./certs:/certs:ro
+    depends_on:
+      - redaptcha
     restart: unless-stopped
 
   # optional for token storage

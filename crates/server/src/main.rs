@@ -342,7 +342,16 @@ async fn issue(
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = hex::encode(nonce_bytes);
     let pow = pow_bits.map(|bits| pow::challenge(&seed_hex, bits));
-    let rendered = puzzle.generate(&s.challenge_key, &id);
+    let puzzle_w = puzzle.puzzle_w();
+    let puzzle_h = puzzle.puzzle_h();
+    let rendered = {
+        let chal_key = s.challenge_key.clone();
+        let id = id.clone();
+        match tokio::task::spawn_blocking(move || puzzle.generate(&chal_key, &id)).await {
+            Ok(r) => r,
+            Err(_) => return Err(err("server busy")),
+        }
+    };
     let frames_b64 = rendered.frames_b64;
     let slider = rendered.slider;
     let created_ts = now_secs();
@@ -389,8 +398,8 @@ async fn issue(
         frames_b64,
         frame_count: FRAME_COUNT,
         frame_dt_ms: FRAME_DT_MS,
-        puzzle_w: puzzle.puzzle_w(),
-        puzzle_h: puzzle.puzzle_h(),
+        puzzle_w,
+        puzzle_h,
         instr: instr_json, 
         sig,
         slider,
@@ -801,7 +810,14 @@ async fn verify(
         }
         s.profiles.lock().entry(ip.clone()).and_modify(|p| p.reset_rounds(&kind));
     }
-    let ok = s.params.verify(&x, difficulty, &vdf_proof);
+    let ok = {
+        let s2 = s.clone();
+        match tokio::task::spawn_blocking(move || s2.params.verify(&x, difficulty, &vdf_proof)).await
+        {
+            Ok(v) => v,
+            Err(_) => return err("server busy"),
+        }
+    };
     if ok {
         {
             let now = Instant::now();
