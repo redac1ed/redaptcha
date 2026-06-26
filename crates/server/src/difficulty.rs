@@ -31,10 +31,10 @@ pub const TRACK_MAX_MEAN_DEV_PX: f64 = 34.0;
 pub const TRACK_MIN_CORR: f64 = 0.15;
 pub const PASSIVE_DIFFICULTY_MIN: u64 = 150_000;
 pub const PASSIVE_DIFFICULTY_MAX: u64 = 600_000;
-pub const PASSIVE_PASS_THRESHOLD: f64 = 0.30;
-pub const PASSIVE_MIN_TRAIL_POINTS: usize = 14;
-pub const PASSIVE_MIN_MOVE_EVENTS: u32 = 24;
-pub const PASSIVE_MIN_SOLVE_SECS: u64 = 8;
+pub const PASSIVE_PASS_THRESHOLD: f64 = 0.18;
+pub const PASSIVE_MIN_TRAIL_POINTS: usize = 8;
+pub const PASSIVE_MIN_MOVE_EVENTS: u32 = 12;
+pub const PASSIVE_MIN_SOLVE_SECS: u64 = 4;
 pub const SOLVE_RATE_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_SOLVES_PER_WINDOW: u32 = 2;
 
@@ -464,41 +464,20 @@ where
 }
 
 pub fn trust_score(t: &TrustInputs, trail_points: usize) -> f64 {
-    let mut score = 1.0;
-    score -= t.suspicion * 0.30;
-    score -= t.fail_ratio * 0.20;
-    score -= t.trail_weight * 0.15;
-    score -= t.timing_weight * 0.15;
-    score += (t.grade_score - 0.5) * 0.20;
-    score -= t.regularity_weight * 0.20;
+    let mut score = 0.85;
+    score -= t.suspicion * 0.25;
+    score -= t.fail_ratio * 0.10;
+    score -= t.trail_weight * 0.25;
+    score -= t.timing_weight * 0.25;
+    score += (t.grade_score - 0.5) * 0.10;
+    score -= t.regularity_weight * 0.35;
     match t.page_load_to_first_move_ms {
-        Some(ms) if ms < 80.0 => score -= 0.20,
-        Some(ms) if ms < 200.0 => score -= 0.10,
-        Some(_) => score += 0.03,
-        None => score -= 0.12,
-    }
-    if t.focus_events == 0 && t.blur_events == 0 {
-        score -= 0.05;
-    }
-    if t.scroll_events == 0 {
-        score -= 0.02;
-    }
-    if t.key_events == 0 {
-        score -= 0.02;
-    }
-    if t.move_events < 8 {
-        score -= 0.05;
+        Some(ms) if ms < 60.0 => score -= 0.20,
+        Some(ms) if ms < 150.0 => score -= 0.08,
+        _ => {}
     }
     if t.webdriver {
-        score -= 0.25;
-    }
-    let is_touch = t.input_type.eq_ignore_ascii_case("touch")
-        || t.input_type.eq_ignore_ascii_case("pen")
-        || t.has_touch;
-    if is_touch {
-        score += 0.03;
-    } else if t.max_pressure <= 0.0 {
-        score -= 0.03;
+        score -= 0.45;
     }
     (score.clamp(0.0, 1.0) * consistency_gate(t, trail_points)).clamp(0.0, 1.0)
 }
@@ -513,21 +492,22 @@ pub fn consistency_gate(t: &TrustInputs, trail_points: usize) -> f64 {
         mult *= 0.05;
     }
     if t.move_events >= 20 && trail_points < 4 {
-        mult *= 0.15;
+        mult *= 0.20;
     }
     if trail_points >= 6 && t.move_events == 0 {
-        mult *= 0.15;
+        mult *= 0.20;
     }
     match t.page_load_to_first_move_ms {
         Some(ms) if ms < 0.0 => mult *= 0.10,
         _ => {}
     }
-    if t.focus_events == 0
+    if !is_touch
+        && t.move_events < 2
+        && trail_points < 4
+        && t.focus_events == 0
         && t.blur_events == 0
         && t.scroll_events == 0
         && t.key_events == 0
-        && !is_touch
-        && t.move_events < MIN_HUMAN_MOVES
     {
         mult *= 0.30;
     }
@@ -560,11 +540,11 @@ pub fn attestation_consistent(t: &core_types::SessionTelemetry) -> f64 {
             mult *= 0.3; 
         }
     } else {
-        mult *= 0.6; 
+        mult *= 0.85; 
     }
     if t.canvas_hash.as_deref().unwrap_or("").is_empty()
         || t.webgl_hash.as_deref().unwrap_or("").is_empty() {
-        mult *= 0.5;
+        mult *= 0.75;
     }
     if let Some(hc) = t.hardware_concurrency {
         if hc == 0 || hc > 256 {
@@ -620,7 +600,7 @@ pub fn is_headless(t: &TrustInputs) -> bool {
         || t.blur_events > 0
         || t.scroll_events > 0
         || t.key_events > 0
-        || t.move_events >= MIN_HUMAN_MOVES
+        || t.move_events >= 2
         || t.has_touch;
     !human_activity
 }

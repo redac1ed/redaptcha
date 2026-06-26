@@ -615,12 +615,6 @@ async fn verify(
             log_reject(&ip, m, None);
             return err("verification failed");
         }
-        if let Err(m) = puzzle.track(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
-            record_profile_failure(&s, &ip).await;
-            flag_profile(&s, &ip, 0.35).await;
-            log_reject(&ip, m, None);
-            return err("verification failed");
-        }
     }
     if !is_touch && puzzle.kind() == "two" {
         if let Err(m) = puzzle.track(&s.challenge_key, &sol.challenge_id, &sol.clicks, &sol.trail) {
@@ -696,7 +690,7 @@ async fn verify(
                 token: None,
                 message: "additional verification required".into(),
                 score: Some(trust),
-                need_challenge: Some("two".to_string()),
+                need_challenge: Some("one".to_string()),
             });
         }
         let pow_ok = match (sol.pow_nonce, sol.pow_hash_hex.as_deref(), pow_bits) {
@@ -704,15 +698,14 @@ async fn verify(
             _ => false,
         };
         if !pow_ok {
-            record_profile_failure(&s, &ip).await;
-            flag_profile(&s, &ip, 0.4).await;
+            flag_profile(&s, &ip, 0.1).await;
             log_reject(&ip, "pow failed", Some(trust));
             return Json(VerifyResponse {
-                ok: false,
+                ok: true,
                 token: None,
-                message: "verification failed".into(),
-                score: Some(0.0),
-                need_challenge: None,
+                message: "additional verification required".into(),
+                score: Some(trust),
+                need_challenge: Some("one".to_string()),
             });
         }
         let solve_secs = now_secs().saturating_sub(created_ts);
@@ -735,27 +728,26 @@ async fn verify(
                 token: None,
                 message: "additional verification required".into(),
                 score: Some(trust),
-                need_challenge: Some("two".to_string()),
+                need_challenge: Some("one".to_string()),
             });
         }
     }
+    let rounds_required = puzzle.rounds();
+    if kind != "three" {
     match trust_decision(trust) {
         TrustDecision::Pass => {}
         TrustDecision::StepUp => {
-            flag_profile(&s, &ip, 0.10).await;
-            log_reject(&ip, "trust step-up", Some(trust));
-            let need_challenge = if kind == "three" {
-                Some("two".to_string())
-            } else {
-                None
-            };
-            return Json(VerifyResponse {
-                ok: true,
-                token: None,
-                message: "additional verification required".into(),
-                score: Some(trust),
-                need_challenge,
-            });
+            if rounds_required <= 1 {
+                flag_profile(&s, &ip, 0.10).await;
+                log_reject(&ip, "trust step-up", Some(trust));
+                return Json(VerifyResponse {
+                    ok: true,
+                    token: None,
+                    message: "additional verification required".into(),
+                    score: Some(trust),
+                    need_challenge: None,
+                });
+            }
         }
         TrustDecision::Fail => {
             record_profile_failure(&s, &ip).await;
@@ -769,6 +761,7 @@ async fn verify(
                 need_challenge: None,
             });
         }
+    }
     }
     let mut trajectory = String::with_capacity(sol.clicks.len() * 16);
     for c in &sol.clicks {
@@ -789,7 +782,6 @@ async fn verify(
         output,
         proof: proof_val,
     };
-    let rounds_required = puzzle.rounds();
     if rounds_required > 1 {
         let now = Instant::now();
         let count = {

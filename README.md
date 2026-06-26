@@ -4,6 +4,8 @@ Another CAPTCHA that protects websites from bots and all.
 # Types of CAPTCHAs:
 - **Click CAPTCHA**, where you have to click on the targets moving at random speeds and directions 
 - **Puzzle CAPTCHA**, where you have to click a hole that fits the piece in an image (currently using a gradient). 
+- **Invisible CAPTCHA**, where you don't need to do anything (would sometimes ask you to solve a puzzle if it suspects you are a bot).
+- **Pursuit CAPTCHA**, where you have to follow a moving target for a certain period.
 
 # Features:
 - **VDF time lock**: Every solve runs a Wesolowski Verifiable Delay Function (VDF), a sequential PoW over a RSA group in the browser to force a minimum wall-clock cost per attempt.

@@ -5,7 +5,7 @@ const TIME_LIMIT = 15000;
 const EXPECTED_CLICKS = 3;
 const HIT_R = 22;
 const SLIDER_ROUNDS = 3;
-const PURSUIT_MS = 4200;
+const PURSUIT_MS = 5200;
 
 const session = {
   pageLoad: Date.now(),

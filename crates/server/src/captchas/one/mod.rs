@@ -13,7 +13,7 @@ pub const PUZZLE_W: u32 = 320;
 pub const PUZZLE_H: u32 = 240;
 pub const EXPECTED_CLICKS: usize = 3;
 const TARGET_R: f64 = 16.0;
-const HIT_R: f64 = 18.0;
+const HIT_R: f64 = 30.0;
 const ORBIT_AMP_MIN: f64 = 24.0;
 const ORBIT_AMP_MAX: f64 = 52.0;
 const ORBIT_TURNS_MIN: f64 = 0.5;
@@ -308,26 +308,30 @@ fn assign_movers(movers: &[Mover], clicks: &[Click]) -> Vec<Option<usize>> {
 }
 
 fn grade_clicks(movers: &[Mover], clicks: &[Click]) -> Result<(), &'static str> {
+    if clicks.len() < movers.len() {
+        return Err("puzzle not solved");
+    }
     let mut used = vec![false; movers.len()];
     for c in clicks {
         let frame = (c.t / FRAME_DT_MS).floor() as i64;
-        let seen_frame = frame.rem_euclid(FRAME_COUNT as i64) as f64;
-        let t_seen = seen_frame * FRAME_DT_MS;
         let mut matched = None;
+        let mut best = f64::INFINITY;
         for (i, m) in movers.iter().enumerate() {
             if used[i] {
                 continue;
             }
-            let (tx, ty) = pos_at_center(m, t_seen);
-            let d = ((c.x - tx).powi(2) + (c.y - ty).powi(2)).sqrt();
-            if d <= HIT_R {
-                matched = Some(i);
-                break;
+            for df in -2..=2 {
+                let seen_frame = (frame + df).rem_euclid(FRAME_COUNT as i64) as f64;
+                let (tx, ty) = pos_at_center(m, seen_frame * FRAME_DT_MS);
+                let d = ((c.x - tx).powi(2) + (c.y - ty).powi(2)).sqrt();
+                if d <= HIT_R && d < best {
+                    best = d;
+                    matched = Some(i);
+                }
             }
         }
-        match matched {
-            Some(i) => used[i] = true,
-            None => return Err("puzzle not solved"),
+        if let Some(i) = matched {
+            used[i] = true;
         }
     }
     if used.iter().all(|&u| u) {

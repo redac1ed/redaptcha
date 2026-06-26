@@ -13,18 +13,18 @@ pub const PUZZLE_H: u32 = 240;
 const TARGET_R: f64 = 14.0;
 const N_DECOYS: usize = 3;
 const DECOY_R: f64 = 10.0;
-const MIN_TRAIL_POINTS: usize = 24;
-const TRACK_MIN_MS: f64 = 2200.0;
+const MIN_TRAIL_POINTS: usize = 18;
+const TRACK_MIN_MS: f64 = 1800.0;
 const SAMPLE_DT_MS: f64 = 40.0;
-const MIN_SAMPLES: usize = 12;
-const MEAN_ERR_MAX: f64 = 46.0;
+const MIN_SAMPLES: usize = 10;
+const MEAN_ERR_MAX: f64 = 78.0;
 const MEAN_ERR_MIN: f64 = 4.0;
-const TRACK_BAND_PX: f64 = 60.0;
-const MIN_GOOD_FRAC: f64 = 0.55;
+const TRACK_BAND_PX: f64 = 95.0;
+const MIN_GOOD_FRAC: f64 = 0.40;
 const MAX_TELEPORT_FRAC: f64 = 0.6;
 const LAG_MIN_MS: f64 = 40.0;
-const LAG_MAX_MS: f64 = 420.0;
-const MIN_VEL_CORR: f64 = 0.15;
+const LAG_MAX_MS: f64 = 520.0;
+const MIN_VEL_CORR: f64 = 0.10;
 
 struct Path {
     ax: [f64; 2],
@@ -102,17 +102,11 @@ fn gen_path(key: &[u8], challenge_id: &str) -> Path {
     token::derive_bytes(key, &format!("pursuit|{challenge_id}"), &mut seed);
     let mut next = rng_from(&seed, 0);
     let tau = std::f64::consts::TAU;
-    let kset = [1.0, 2.0, 3.0];
     Path {
-        ax: [50.0 + next() * 25.0, 15.0 + next() * 15.0],
-        ay: [38.0 + next() * 20.0, 12.0 + next() * 12.0],
+        ax: [40.0 + next() * 18.0, 6.0 + next() * 8.0],
+        ay: [30.0 + next() * 14.0, 5.0 + next() * 6.0],
         phase: [next() * tau, next() * tau, next() * tau, next() * tau],
-        k: [
-            kset[(next() * 3.0) as usize % 3],
-            kset[(next() * 3.0) as usize % 3],
-            kset[(next() * 3.0) as usize % 3],
-            kset[(next() * 3.0) as usize % 3],
-        ],
+        k: [1.0, 2.0, 1.0, 2.0],
         dir: if next() < 0.5 { 1.0 } else { -1.0 },
     }
 }
